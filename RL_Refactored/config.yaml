@@ -1,0 +1,357 @@
+# ============================================================================
+# RL REFACTORED CONFIGURATION FILE
+# ============================================================================
+# This file contains all configurable parameters for RL training
+# Organized into clear sections for easy navigation and modification
+# ============================================================================
+
+# ============================================================================
+# MODEL ARCHITECTURE PARAMETERS (from ROM)
+# ============================================================================
+# These parameters must match the ROM model configuration
+# NOTE: For actual ROM model initialization, use ROM_Refactored/config.yaml
+# This section is minimal for Config validation only
+model:
+  latent_dim: 128       # Size of latent space representation
+  u_dim: 6             # Control input dimensions (3 producer BHP + 3 gas injection)
+  n_channels: 2        # Number of input channels (pressure, saturation)
+  method: E2C          # Model method (for compatibility with ROM)
+  sigma: 0.0           # Noise parameter (for compatibility with ROM)
+
+# ============================================================================
+# DATA CONFIGURATION (for compatibility with ROM Config validation)
+# ============================================================================
+# Minimal data section - actual data comes from ROM_Refactored
+data:
+  input_shape: [2, 34, 16, 25]  # [channels, X, Y, Z] - matches ROM training data
+  num_prod: 3                    # Number of production wells
+  num_inj: 3                     # Number of injection wells
+  well_locations:
+    injectors:
+      I1: [10, 12, 24]
+      I2: [31, 13, 24]
+      I4: [8, 1, 24]
+    producers:
+      P1: [1, 11, 24]
+      P2: [16, 4, 24]
+      P3: [18, 11, 24]
+
+# ============================================================================
+# TRAINING CONFIGURATION (for compatibility with ROM Config validation)
+# ============================================================================
+# Minimal training section - RL training uses rl_model.training instead
+training:
+  epoch: 200           # Not used in RL, but required for Config validation
+  batch_size: 16       # Not used in RL, but required for Config validation
+  learning_rate: 0.0001  # Not used in RL, but required for Config validation
+  nsteps: 2            # Not used in RL, but required for Config validation
+  num_tsteps: 30       # Number of time steps (matches RL episode length)
+
+# ============================================================================
+# ENCODER/DECODER/TRANSITION (for compatibility with ROM Config validation)
+# ============================================================================
+# Minimal sections - actual models loaded from ROM_Refactored saved_models
+encoder:
+  conv_layers:
+    conv1: [null, 16, [3,3,3], [2,2,2], [1,1,1]]
+    conv2: [16, 32, [3,3,3], [1,1,1], [1,1,1]]
+    conv3: [32, 64, [3,3,3], [2,2,2], [1,1,1]]
+    conv4: [64, 128, [3,3,3], [1,1,1], [1,1,1]]
+  residual_blocks: 3
+  residual_channels: 128
+  output_dims: [128, 9, 4, 7]
+  flattened_size: 32256
+
+decoder:
+  deconv_layers:
+    deconv1: [128, 64, [3,3,3], [1,1,1], [1,1,1]]
+    deconv2: [64, 32, [4,4,4], [2,2,2], [1,1,1]]
+    deconv3: [32, 16, [3,3,3], [1,1,1], [1,1,1]]
+    deconv4: [16, 16, [4,4,4], [2,2,2], [2,1,3], [0,0,1]]
+    final_conv: [16, null, [1,1,1], [1,1,1], [0,0,0]]
+  crop_z_to: null
+  use_exact_dimensions: true
+
+transition:
+  type: linear
+  encoder_hidden_dims: [200, 200]
+
+# ============================================================================
+# LOSS CONFIGURATION (for compatibility with ROM Config validation)
+# ============================================================================
+# Minimal loss section - not used in RL training
+loss:
+  enable_flux_loss: false
+  enable_bhp_loss: false
+  enable_non_negative_loss: false
+  lambda_non_negative_loss: 1.0
+  lambda_reconstruction_loss: 1.0
+  enable_per_element_normalization: true
+  reconstruction_variance: 1.0
+  lambda_flux_loss: 0.001
+  lambda_bhp_loss: 20.0
+  lambda_trans_loss: 1.0
+  lambda_yobs_loss: 1.0
+  channel_mapping:
+    pressure: 2
+    perm_x: 3
+    perm_y: 4
+    perm_z: 5
+    trans_x: 6
+    trans_y: 7
+    trans_z: 8
+    use_precomputed_trans: false
+
+# ============================================================================
+# RUNTIME CONFIGURATION (for compatibility with ROM Config validation)
+# ============================================================================
+runtime:
+  device: auto
+  print_interval: 5000
+  save_best_model: true
+  best_model_criterion: total_loss
+  verbose: false
+  detailed_loss_logging:
+    enable: true
+    frequency: final_only
+    epoch_interval: 20
+    batch_interval: 10
+    include_evaluation: true
+    include_lr_info: true
+  wandb:
+    enable: true
+    project: RL-SAC
+    entity: null
+    name: null
+    tags: []
+    notes: ''
+    config_file: config.yaml
+
+# ============================================================================
+# REINFORCEMENT LEARNING MODEL CONFIGURATION
+# ============================================================================
+rl_model:
+  # ===== RESERVOIR CONFIGURATION =====
+  reservoir:
+    num_producers: 3                    # Number of production wells
+    num_injectors: 3                    # Number of injection wells
+    time_step_days: 365                 # Physical time step duration in days
+    time_step_normalized: 1.0           # Normalized time step (dt) for ROM integration
+    
+  # ===== ECONOMIC REWARD FUNCTION PARAMETERS =====
+  economics:
+    # Unit conversion factors
+    conversion:
+      lf3_to_intermediate: 0.1167       # First conversion factor (cubic feet to intermediate unit)
+      intermediate_to_ton: 4.536e-4     # Second conversion factor (intermediate to tons)
+      ft3_to_barrel: 5.61458            # Standard oil industry conversion: 1 barrel = 5.61458 cubic feet
+      
+    # Economic values ($/unit)
+    prices:
+      gas_injection_revenue: 40.0       # Revenue from gas injection ($/ton)
+      gas_injection_cost: 10.0          # Operating cost of gas injection ($/ton)
+      water_production_penalty: 5.0     # Penalty for water production ($/barrel)
+      gas_production_penalty: 50.0      # Cost/penalty for produced gas ($/ton)
+      
+    # Normalization
+    scale_factor: 1000000.0             # Final scaling factor for reward normalization
+    
+  # ===== NEURAL NETWORK ARCHITECTURE =====
+  networks:
+    # Hidden layer dimensions for all networks
+    hidden_dim: 200                     # Hidden layer size for Q-networks and policy networks
+    
+    # Neural network initialization
+    initialization:
+      xavier_gain: 1.0                  # Xavier initialization gain factor
+      bias_init: 0.0                    # Bias initialization value
+      
+    # Q-network architecture (critic)
+    q_network:
+      num_outputs: 1                    # Each Q-network outputs single Q-value
+      twin_networks: true               # Use twin Q-networks for SAC
+      
+    # Policy network architecture (actor)
+    policy:
+      type: 'gaussian'                  # Gaussian policy for exploration
+      output_activation: 'sigmoid'      # Output activation to ensure [0,1] range
+      
+  # ===== SAC ALGORITHM HYPERPARAMETERS =====
+  sac:
+    # Learning parameters
+    learning_rates:
+      critic: 0.0001                    # Learning rate for Q-networks (critic)
+      policy: 0.0003                    # Learning rate for policy network (actor)
+      
+    # Discount and update parameters
+    discount_factor: 0.986              # Gamma - discount factor for future rewards
+    soft_update_tau: 0.005              # Tau - soft update rate for target networks
+    target_update_interval: 1            # Update target networks every N training steps
+    
+    # Entropy regularization
+    entropy:
+      alpha: 0.2                        # Entropy regularization weight for exploration
+      automatic_tuning: true            # Automatic entropy tuning
+      
+    # Training stability
+    gradient_clipping:
+      policy_max_norm: 10.0             # Maximum gradient norm for policy updates
+      enable: true                      # Enable gradient clipping
+      
+  # ===== GAUSSIAN POLICY PARAMETERS =====
+  gaussian_policy:
+    # Log standard deviation bounds for numerical stability
+    log_std_bounds:
+      min: -1.0                         # Minimum log std (controls minimum exploration)
+      max: 1.0                          # Maximum log std (controls maximum exploration)
+      
+    # Numerical stability
+    epsilon: 1e-6                       # Small constant to prevent log(0)
+      
+    # Default action space (if no action_space provided)
+    default_action_space:
+      scale: 1.0                        # Default action scale
+      bias: 0.0                         # Default action bias
+      
+  # ===== EXPERIENCE REPLAY PARAMETERS =====
+  replay_memory:
+    capacity: 100000                    # Maximum number of transitions to store
+    initial_exploration_steps: 30       # Steps of random exploration before learning
+    batch_size: 256                     # Batch size for training updates
+    
+  # ===== TRAINING CONFIGURATION =====
+  training:
+    # Episode and step limits
+    max_episodes: 100                   # Maximum number of training episodes
+    max_steps_per_episode: 30           # Maximum steps per episode
+    updates_per_step: 1                 # Gradient updates per environment step
+    exploration_steps: 0                # Random exploration phase
+    
+    # Logging and checkpointing
+    print_interval: 10                  # Print progress every N episodes
+    save_interval: 100                  # Save model every N episodes
+    debug_mode_episodes: 5              # Number of episodes to run debug mode
+    
+    # Random seeds for reproducibility
+    seeds:
+      torch: 123456                     # PyTorch random seed
+      numpy: 123456                     # NumPy random seed
+      replay_memory: 123456             # Replay memory random seed
+  
+  # ===== ENHANCED DASHBOARD CONFIGURATION =====
+  dashboard:
+    max_stored_episodes: 150            # Maximum number of episodes to store for dashboard analysis
+    capture_spatial_states: true        # Enable spatial state capture for enhanced visualization
+    spatial_capture_frequency: 1        # Capture spatial state every N steps
+  
+  # ===== OBSERVATION SCALING FOR DISPLAY =====
+  observation_scaling:
+    # Default ranges for display when E2C parameters not available
+    injector_bhp_min_psi: 1000.0        # Default min for display
+    injector_bhp_max_psi: 5000.0        # Default max for display
+    water_production_max_ft3_day: 500000.0  # Default max for display
+    gas_production_max_ft3_day: 200000000.0 # Default max for display
+    ft3_to_barrel: 5.61458             # Unit conversion factor
+
+  # ===== ENHANCED LOGGING CONFIGURATION =====
+  logging:
+    step_print_frequency: 30            # Print every N steps during episodes
+    episode_print_frequency: 10         # Print every N episodes
+    verbose_actions: false              # Store detailed action history for analysis
+    show_physical_units: false          # Display BHP/Gas in real units (psi, ft³/day)
+    show_economic_breakdown: false      # Show economic analysis in episode summary
+    show_convergence_detection: false   # Detect and report action convergence
+    checkpoint_save_frequency: 50       # Save checkpoint every N episodes
+    training_update_frequency: 10       # Print training loss every N updates
+      
+  # ===== ENVIRONMENT SIMULATION PARAMETERS =====
+  environment:
+    # ROM prediction methodology
+    prediction_mode: 'state_based'      # 'latent_based'=faster, 'state_based'=more accurate
+    
+    # State noise (for stochastic environments)
+    noise:
+      enable: false                     # Enable state noise
+      std: 0.10                         # Standard deviation for state noise
+      
+    # Episode termination
+    max_episode_steps: 30               # Maximum steps before episode termination
+    
+  # ===== ACTION VARIATION ENHANCEMENT =====
+  action_variation:
+    enabled: true                       # Enable comprehensive action variation enhancement
+    mode: 'adaptive'                    # Variation strategy: 'adaptive', 'exploration', 'exploitation', 'minimal'
+    
+    # Noise parameters for action variation
+    noise_decay_rate: 0.995             # How fast noise decreases per episode
+    max_noise_std: 0.25                 # Maximum noise standard deviation for early exploration
+    min_noise_std: 0.01                # Minimum noise standard deviation for fine-tuning
+    step_variation_amplitude: 0.15     # Amplitude for step-wise variation within episodes
+    
+    # Well-specific exploration strategies (different behavior per well)
+    well_strategies:
+      P1:                               # Producer 1 - Conservative strategy
+        variation: 0.15                 # Moderate variation level
+        bias: 0.0                       # No systematic bias
+        exploration_scale: 0.8          # Reduced exploration scaling
+      P2:                               # Producer 2 - Balanced strategy  
+        variation: 0.20                 # Standard variation level
+        bias: 0.05                      # Slight positive bias
+        exploration_scale: 1.0          # Standard exploration scaling
+      P3:                               # Producer 3 - Aggressive strategy
+        variation: 0.30                 # High variation level
+        bias: -0.05                     # Slight negative bias for differentiation
+        exploration_scale: 1.3          # Enhanced exploration scaling
+      I1:                               # Injector 1 - Conservative strategy
+        variation: 0.18                 # Moderate variation level
+        bias: 0.02                      # Small positive bias
+        exploration_scale: 0.9          # Slightly reduced exploration
+      I2:                               # Injector 2 - Balanced strategy
+        variation: 0.25                 # Higher variation level
+        bias: 0.0                       # No systematic bias
+        exploration_scale: 1.1          # Slightly enhanced exploration
+      I3:                               # Injector 3 - Aggressive strategy
+        variation: 0.35                 # Highest variation level
+        bias: 0.08                      # Positive bias for differentiation
+        exploration_scale: 1.4          # Maximum exploration scaling
+        
+    # Enhanced Gaussian Policy configuration (alternative to deterministic policy)
+    enhanced_gaussian_policy:
+      enabled: false                    # Set to true to use Gaussian policy instead of deterministic
+      log_std_bounds: [-1.0, 1.0]      # Wider bounds for better exploration
+      entropy_weight: 0.2               # Entropy regularization weight for exploration bonus
+    
+  # ===== COMPATIBILITY SETTINGS =====
+  compatibility:
+    dashboard_integration: true         # Enable dashboard integration
+    legacy_reward_function: false       # Use legacy reward function format
+    auto_scaling: true                  # Automatically calculate scaling parameters
+
+# ============================================================================
+# PATHS CONFIGURATION
+# ============================================================================
+# These paths are configurable via the dashboard and default to ROM_Refactored locations
+paths:
+  # Standard ROM paths (for compatibility with Config validation)
+  output_dir: ../ROM_Refactored/saved_models/     # Output directory for models
+  data_dir: ../ROM_Refactored/sr3_batch_output/    # Data directory for H5 files
+  processed_data_dir: ../ROM_Refactored/processed_data/  # Processed data directory
+  model_dir: ../ROM_Refactored/saved_models/      # Model directory
+  model_prefix: e2co                              # Model file prefix
+  file_extension: .h5                              # Model file extension
+  normalization_params_dir: ../ROM_Refactored/processed_data/  # Normalization parameters directory
+  
+  # RL-specific paths (used by dashboard)
+  rom_models_dir: ../ROM_Refactored/saved_models/  # Path to ROM trained models (relative to RL_Refactored)
+  state_data_dir: ../ROM_Refactored/sr3_batch_output/  # Path to H5 data files (relative to RL_Refactored)
+  
+  # Alternative: Use absolute paths or paths relative to project root
+  # rom_models_dir: ./saved_models/              # Use RL_Refactored local folder
+  # state_data_dir: sr3_batch_output/           # Use RL_Refactored local folder
+
+# ============================================================================
+# ROM CONFIG PATH (for loading ROM model configuration)
+# ============================================================================
+# Path to ROM_Refactored config.yaml - ensures ROM parameters come from ROM config
+rom_config_path: ../ROM_Refactored/config.yaml
+

@@ -1,0 +1,457 @@
+data_preprocessing:
+  paths:
+    data_dir: sr3_batch_output/
+    processed_data_dir: ./processed_data/
+    normalization_params_dir: ./processed_data/
+  processing: &id001
+    nsteps: 2
+    train_split_ratio: 0.75
+    random_seed: 42
+  normalization: &id002
+    default_spatial_normalization: minmax
+    default_timeseries_normalization: minmax
+    spatial_datasets:
+      PRES: minmax
+      SG: minmax
+      SW: minmax
+      PERMI: log
+      PERMJ: log
+      PERMK: log
+      POROS: minmax
+    timeseries_datasets:
+      BHP: minmax
+      GASRATSC: minmax
+      WATRATSC: minmax
+  validation:
+    check_file_integrity: true
+    check_data_shapes: true
+    check_data_ranges: true
+    warn_on_missing_files: true
+  output:
+    save_normalization_params: true
+    save_processed_data: true
+    include_metadata: true
+    include_data_selections: true
+    timestamp_files: true
+  runtime:
+    verbose: true
+    show_progress: true
+model:
+  latent_dim: 32
+  u_dim: 6
+  n_channels: 2
+  method: E2C
+  sigma: 0.0
+data:
+  input_shape:
+  - 2
+  - 34
+  - 16
+  - 25
+  num_prod: 3
+  num_inj: 3
+  well_locations:
+    injectors:
+      I1:
+      - 10
+      - 12
+      - 24
+      I2:
+      - 31
+      - 13
+      - 24
+      I4:
+      - 8
+      - 1
+      - 24
+    producers:
+      P1:
+      - 1
+      - 11
+      - 24
+      P2:
+      - 16
+      - 4
+      - 24
+      P3:
+      - 18
+      - 11
+      - 24
+encoder:
+  conv_layers:
+    conv1:
+    - 2
+    - 16
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv2:
+    - 16
+    - 32
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    conv3:
+    - 32
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv4:
+    - 64
+    - 128
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+  residual_blocks: 3
+  residual_channels: 128
+  output_dims:
+  - 128
+  - 9
+  - 4
+  - 7
+  flattened_size: 32256
+decoder:
+  deconv_layers:
+    deconv1:
+    - 128
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    deconv2:
+    - 64
+    - 32
+    - - 4
+      - 4
+      - 4
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    deconv3:
+    - 32
+    - 16
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    deconv4:
+    - 16
+    - 16
+    - - 4
+      - 4
+      - 4
+    - - 2
+      - 2
+      - 2
+    - - 2
+      - 1
+      - 3
+    - - 0
+      - 0
+      - 1
+    final_conv:
+    - 16
+    - 2
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    - - 0
+      - 0
+      - 0
+  crop_z_to: null
+  use_exact_dimensions: true
+transition:
+  type: linear
+  encoder_hidden_dims:
+  - 200
+  - 200
+  fno:
+    width: 64
+    modes_x: 8
+    modes_y: 8
+    modes_z: 4
+    n_layers: 4
+    control_injection: spatial_encoding
+    well_specific_spatial:
+      influence_radius: 3.0
+      influence_function: gaussian
+      influence_strength: 1.0
+      use_3d_influence: true
+      z_penetration_mode: full
+      normalization: max_normalize
+      per_well_scaling: true
+      injector_scaling: 1.2
+      producer_scaling: 0.8
+      temporal_weighting: true
+      model_interference: false
+      interference_threshold: 5.0
+  hybrid_fno:
+    fno_weight: 0.7
+    linear_weight: 0.3
+    use_learned_blending: false
+    forward_mode: fno_only
+    predict_mode: fno_only
+training:
+  epoch: 200
+  batch_size: 64
+  learning_rate: 0.0001
+  nsteps: 2
+  num_tsteps: 30
+learning_rate_scheduler:
+  enable: false
+  type: constant
+  reduce_on_plateau:
+    mode: min
+    factor: 0.5
+    patience: 5
+    threshold: 0.0001
+    threshold_mode: rel
+    cooldown: 3
+    min_lr: 1.0e-07
+    eps: 1.0e-08
+    verbose: true
+  exponential_decay:
+    gamma: 0.95
+  step_decay:
+    step_size: 100
+    gamma: 0.5
+  cosine_annealing:
+    T_max: 20
+    eta_min: 1.0e-06
+  cyclic:
+    base_lr: 1.0e-05
+    max_lr: 0.001
+    step_size_up: 500
+    step_size_down: null
+    mode: triangular
+    gamma: 1.0
+    scale_fn: null
+    scale_mode: cycle
+    cycle_momentum: true
+    base_momentum: 0.8
+    max_momentum: 0.9
+  one_cycle:
+    max_lr: 0.001
+    total_steps: null
+    epochs: null
+    steps_per_epoch: null
+    pct_start: 0.3
+    anneal_strategy: cos
+    cycle_momentum: true
+    base_momentum: 0.85
+    max_momentum: 0.95
+    div_factor: 25.0
+    final_div_factor: 10000.0
+  discriminator:
+    enable: false
+    type: fixed
+  logging:
+    log_lr_every_batch: false
+    log_lr_every_epoch: true
+    log_scheduler_events: true
+    include_momentum: true
+loss:
+  enable_flux_loss: false
+  enable_bhp_loss: false
+  enable_non_negative_loss: false
+  lambda_non_negative_loss: 1.0
+  lambda_reconstruction_loss: 1.0
+  enable_per_element_normalization: true
+  reconstruction_variance: 1.0
+  lambda_flux_loss: 0.001
+  lambda_bhp_loss: 20.0
+  lambda_trans_loss: 1.0
+  lambda_yobs_loss: 1.0
+  channel_mapping:
+    pressure: 2
+    perm_x: 3
+    perm_y: 4
+    perm_z: 5
+    trans_x: 6
+    trans_y: 7
+    trans_z: 8
+    use_precomputed_trans: false
+dynamic_loss_weighting:
+  enable: false
+  method: gradnorm
+  gradnorm:
+    alpha: 0.12
+    learning_rate: 0.025
+  uncertainty:
+    log_variance_init: 0.0
+  dwa:
+    temperature: 2.0
+    window_size: 10
+  yoto:
+    alpha: 0.5
+    beta: 0.5
+  adaptive_curriculum:
+    initial_weights:
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    adaptation_rate: 0.1
+adversarial:
+  enable: false
+  discriminator_learning_rate: 0.0001
+  discriminator_update_frequency: 1
+discriminator:
+  enable: false
+  conv_layers:
+    conv1:
+    - null
+    - 32
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv2:
+    - 32
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv3:
+    - 64
+    - 128
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv4:
+    - 128
+    - 256
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 1
+    - - 1
+      - 1
+      - 0
+  final_layers:
+    hidden_dim: 512
+    dropout: 0.3
+  learning_rate: 0.0002
+  update_ratio: 1
+  label_smoothing: 0.1
+testing:
+  num_tsteps: 30
+  test_batch_size: 16
+  visualization:
+    default_layer: null
+    default_timestep: 0
+    default_case: 0
+    default_observation: 0
+    show_metrics: true
+    show_comparison: true
+    show_well_locations: true
+    enable_masking: false
+    mask_file_path: sr3_batch_output/inactive_cell_locations.h5
+  metrics:
+    compute_r2: true
+    compute_rmse: true
+    compute_mae: true
+    compute_ape: true
+    filter_negative_predictions: true
+    epsilon_auto_calculate: true
+validation:
+  eval_frequency: 1
+  test_batch_size: 16
+  save_predictions: false
+paths:
+  output_dir: ./saved_models/
+  data_dir: sr3_batch_output/
+  processed_data_dir: ./processed_data/
+  model_dir: ./saved_models/
+  model_prefix: e2co
+  file_extension: .h5
+  normalization_params_dir: ./processed_data/
+runtime:
+  device: auto
+  print_interval: 5000
+  save_best_model: true
+  best_model_criterion: total_loss
+  verbose: false
+  detailed_loss_logging:
+    enable: true
+    frequency: final_only
+    epoch_interval: 20
+    batch_interval: 10
+    include_evaluation: true
+    include_lr_info: true
+  wandb:
+    enable: true
+    project: ROM-E2C
+    entity: null
+    name: null
+    tags: []
+    notes: ''
+    config_file: config.yaml
+experiment:
+  seed: 42
+  gradient_clip: 0.0
+  early_stopping_patience: 50
+data_preprocessing_processing: *id001
+data_preprocessing_normalization: *id002
