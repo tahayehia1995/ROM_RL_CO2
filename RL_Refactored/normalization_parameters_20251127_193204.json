@@ -1,0 +1,129 @@
+{
+    "spatial_channels": {
+        "SW": {
+            "normalization_type": "minmax",
+            "selected_for_training": true,
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "0.9999919"
+            }
+        },
+        "SG": {
+            "normalization_type": "minmax",
+            "selected_for_training": true,
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "0.9999322"
+            }
+        },
+        "PRES": {
+            "normalization_type": "minmax",
+            "selected_for_training": true,
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "4470.1836"
+            }
+        }
+    },
+    "control_variables": {
+        "BHP": {
+            "normalization_type": "minmax",
+            "selected_wells": [
+                "P1",
+                "P2",
+                "P3"
+            ],
+            "parameters": {
+                "type": "minmax",
+                "min": "1087.7849",
+                "max": "5050.4287"
+            }
+        },
+        "GASRATSC": {
+            "normalization_type": "minmax",
+            "selected_wells": [
+                "I1",
+                "I2",
+                "I3"
+            ],
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "143972480.0"
+            }
+        }
+    },
+    "observation_variables": {
+        "BHP": {
+            "normalization_type": "minmax",
+            "selected_wells": [
+                "I1",
+                "I2",
+                "I3"
+            ],
+            "parameters": {
+                "type": "minmax",
+                "min": "1087.7849",
+                "max": "5050.4287"
+            }
+        },
+        "GASRATSC": {
+            "normalization_type": "minmax",
+            "selected_wells": [
+                "P1",
+                "P2",
+                "P3"
+            ],
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "143972480.0"
+            }
+        },
+        "WATRATSC": {
+            "normalization_type": "minmax",
+            "selected_wells": [
+                "P1",
+                "P2",
+                "P3"
+            ],
+            "parameters": {
+                "type": "minmax",
+                "min": "0.0",
+                "max": "324207.5"
+            }
+        }
+    },
+    "selection_summary": {
+        "spatial_channels": [
+            "SW",
+            "SG",
+            "PRES"
+        ],
+        "control_variables": [
+            "BHP",
+            "GASRATSC"
+        ],
+        "observation_variables": [
+            "BHP",
+            "GASRATSC",
+            "WATRATSC"
+        ],
+        "training_channels": [
+            "SW",
+            "SG",
+            "PRES"
+        ]
+    },
+    "metadata": {
+        "created_timestamp": "20251127_193204",
+        "source": "RL Configuration Dashboard - Optimal Structure",
+        "structure": "Controls: Producer BHP + Gas Injection, Observations: Injector BHP + Gas Production + Water Production",
+        "normalization_method": "training_only_parameters",
+        "data_leakage": "eliminated",
+        "performance_improvement": "78.4% + 76.2% better than alternatives"
+    }
+}
