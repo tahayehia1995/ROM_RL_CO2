@@ -34,7 +34,8 @@ class Decoder(nn.Module):
         
         # 3D ResNet blocks for feature refinement
         res_layers = []
-        for i in range(config['encoder']['residual_blocks']):
+        residual_blocks = config['encoder'].get('residual_blocks', 0) or 0
+        for i in range(residual_blocks):
             res_layers.append(
                 ResidualConv3D(
                     config['encoder']['residual_channels'], 

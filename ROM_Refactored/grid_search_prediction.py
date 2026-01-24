@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utilities.config_loader import Config
 from utilities.timing import Timer
+from utilities.wandb_integration import create_wandb_logger
 from data_preprocessing import load_processed_data
 from model.training.rom_wrapper import ROMWithE2C
 from testing.dashboard import TestingDashboard
@@ -51,6 +52,10 @@ DATA_DIR = 'sr3_batch_output/'  # Directory containing raw data files (batch_spa
 PROCESSED_DATA_DIR = './processed_data/'  # Directory containing processed data files
 CONFIG_PATH = 'config.yaml'
 
+# WandB configuration
+WANDB_PROJECT = 'ROM-E2C-Prediction'  # WandB project name for prediction runs
+WANDB_ENABLED = True  # Set to False to disable wandb logging
+
 # Timeseries groups mapping (includes well names for individual well selection)
 TIMESERIES_GROUPS_MAP = {
     'BHP (All Injectors)': (list(range(3)), ['BHP1', 'BHP2', 'BHP3'], 'psi'),
@@ -65,56 +70,112 @@ TIMESERIES_GROUPS_MAP = {
 
 def _parse_model_filename_with_channels(filename: str) -> Optional[Dict[str, Any]]:
     """
-    Parse model filename to extract hyperparameters including n_channels.
-    Supports both old format (without ch) and new format (with ch).
+    Parse model filename to extract hyperparameters including n_channels and architecture parameters.
+    Uses the same robust parsing logic as TestingDashboard to handle all naming variations.
     
     Args:
-        filename: Model filename (e.g., 'e2co_encoder_grid_bs32_ld64_ns2_ch4_run0001_bs32_ld64_ns2_ch4.h5')
+        filename: Model filename (e.g., 'e2co_encoder_grid_bs8_ld128_ns2_ch2_run0001_bs8_ld128_ns2_ch2_schfix_rb3_ehd300-300_dlwFalse_advFalse_bs8_ld128_ns2_ch2.h5')
         
     Returns:
-        Dict with batch_size, latent_dim, n_steps, n_channels, run_id, component, or None if parsing fails
+        Dict with component, batch_size, latent_dim, n_steps, n_channels, run_id, 
+        residual_blocks (if present), encoder_hidden_dims (if present), or None if parsing fails
     """
     try:
-        # New format with n_channels: e2co_{component}_grid_bs{bs}_ld{ld}_ns{ns}_ch{ch}_run{id}_bs{bs}_ld{ld}_ns{ns}_ch{ch}.h5
-        pattern_with_ch = r'e2co_(encoder|decoder|transition)_grid_bs(\d+)_ld(\d+)_ns(\d+)_ch(\d+)_run(\d+)_bs\d+_ld\d+_ns\d+_ch\d+\.h5'
-        match = re.match(pattern_with_ch, filename)
+        # Pattern structure: e2co_{component}_grid_bs{bs}_ld{ld}_ns{ns}_ch?{ch}?_run{run}_..._bs{bs}_ld{ld}_ns{ns}_ch?{ch}?.h5
+        # The run_id can contain variable content like: sch{scheduler}_rb{blocks}_ehd{dims}_dlw{method}_adv{enable}
+        # We need to match from run{number} until the final bs{bs}_ld{ld}_ns{ns}_ch?{ch}? pattern
+        
+        # More flexible pattern that handles variable content in run_id
+        # Captures: component, bs1, ld1, ns1, ch1 (optional), run_number, variable run_id content, bs2, ld2, ns2, ch2 (optional)
+        pattern = r'e2co_(encoder|decoder|transition)_grid_bs(\d+)_ld(\d+)_ns(\d+)(?:_ch(\d+))?_run(\d+)((?:_[^_]+)*)_bs(\d+)_ld(\d+)_ns(\d+)(?:_ch(\d+))?\.h5'
+        match = re.match(pattern, filename)
         
         if match:
             component = match.group(1)
             batch_size = int(match.group(2))
             latent_dim = int(match.group(3))
             n_steps = int(match.group(4))
-            n_channels = int(match.group(5))
-            run_id = match.group(6)
+            n_channels_first = match.group(5)  # May be None
+            run_number = match.group(6)
+            run_id_content = match.group(7)  # Variable content between run number and final base params
+            batch_size_final = int(match.group(8))
+            latent_dim_final = int(match.group(9))
+            n_steps_final = int(match.group(10))
+            n_channels_final = match.group(11)  # May be None
             
-            return {
+            # Verify consistency (first and final base params should match)
+            if (batch_size != batch_size_final or 
+                latent_dim != latent_dim_final or 
+                n_steps != n_steps_final):
+                # If inconsistent, try to use final values as they're more reliable
+                batch_size = batch_size_final
+                latent_dim = latent_dim_final
+                n_steps = n_steps_final
+            
+            # Extract n_channels (prefer final occurrence, fallback to first)
+            n_channels = None
+            if n_channels_final:
+                n_channels = int(n_channels_final)
+            elif n_channels_first:
+                n_channels = int(n_channels_first)
+            
+            # Extract residual_blocks from run_id_content (pattern: _rb{number})
+            residual_blocks = None
+            rb_match = re.search(r'_rb(\d+)', run_id_content)
+            if rb_match:
+                residual_blocks = int(rb_match.group(1))
+            
+            # Extract encoder_hidden_dims from run_id_content (pattern: _ehd{dim1}-{dim2}-...)
+            encoder_hidden_dims = None
+            ehd_match = re.search(r'_ehd([\d-]+)', run_id_content)
+            if ehd_match:
+                ehd_str = ehd_match.group(1)
+                # Parse dimensions separated by hyphens (e.g., "300-300" or "200-200-200")
+                try:
+                    encoder_hidden_dims = [int(dim) for dim in ehd_str.split('-')]
+                except ValueError:
+                    encoder_hidden_dims = None
+            
+            # Construct full run_id: run{number}{content}
+            full_run_id = f"run{run_number}{run_id_content}"
+            
+            result = {
                 'component': component,
                 'batch_size': batch_size,
                 'latent_dim': latent_dim,
                 'n_steps': n_steps,
-                'n_channels': n_channels,
-                'run_id': run_id
+                'n_channels': n_channels,  # May be None if not present
+                'run_id': full_run_id,
+                'run_number': run_number  # Keep run number separately for grouping
             }
+            
+            # Add architecture parameters if found
+            if residual_blocks is not None:
+                result['residual_blocks'] = residual_blocks
+            if encoder_hidden_dims is not None:
+                result['encoder_hidden_dims'] = encoder_hidden_dims
+            
+            return result
         
-        # Old format without n_channels: e2co_{component}_grid_bs{bs}_ld{ld}_ns{ns}_run{id}_bs{bs}_ld{ld}_ns{ns}.h5
-        # Default to n_channels=2 for backward compatibility
-        pattern_old = r'e2co_(encoder|decoder|transition)_grid_bs(\d+)_ld(\d+)_ns(\d+)_run(\d+)_bs\d+_ld\d+_ns\d+\.h5'
-        match = re.match(pattern_old, filename)
+        # Fallback: try simpler pattern for older filenames without channels
+        pattern_simple = r'e2co_(encoder|decoder|transition)_grid_bs(\d+)_ld(\d+)_ns(\d+)_run(\d+)(?:_[^_]+)*\.h5'
+        match_simple = re.match(pattern_simple, filename)
         
-        if match:
-            component = match.group(1)
-            batch_size = int(match.group(2))
-            latent_dim = int(match.group(3))
-            n_steps = int(match.group(4))
-            run_id = match.group(5)
+        if match_simple:
+            component = match_simple.group(1)
+            batch_size = int(match_simple.group(2))
+            latent_dim = int(match_simple.group(3))
+            n_steps = int(match_simple.group(4))
+            run_number = match_simple.group(5)
             
             return {
                 'component': component,
                 'batch_size': batch_size,
                 'latent_dim': latent_dim,
                 'n_steps': n_steps,
-                'n_channels': 2,  # Default for old format
-                'run_id': run_id
+                'n_channels': None,  # Will default to 2 later if needed
+                'run_id': f"run{run_number}",
+                'run_number': run_number
             }
         
         return None
@@ -160,14 +221,17 @@ def discover_models_with_channels(model_dir: str = './saved_models/') -> List[Di
         parsed = _parse_model_filename_with_channels(filename)
         if parsed:
             # Use composite key including n_channels
-            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], parsed['n_channels'])
+            n_channels = parsed.get('n_channels')
+            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], n_channels)
             if model_key not in model_sets:
                 model_sets[model_key] = {
                     'run_id': parsed['run_id'],
                     'batch_size': parsed['batch_size'],
                     'latent_dim': parsed['latent_dim'],
                     'n_steps': parsed['n_steps'],
-                    'n_channels': parsed['n_channels'],
+                    'n_channels': n_channels,
+                    'residual_blocks': parsed.get('residual_blocks'),
+                    'encoder_hidden_dims': parsed.get('encoder_hidden_dims'),
                     'encoder': None,
                     'decoder': None,
                     'transition': None
@@ -178,7 +242,8 @@ def discover_models_with_channels(model_dir: str = './saved_models/') -> List[Di
         filename = os.path.basename(decoder_file)
         parsed = _parse_model_filename_with_channels(filename)
         if parsed:
-            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], parsed['n_channels'])
+            n_channels = parsed.get('n_channels')
+            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], n_channels)
             if model_key in model_sets:
                 model_sets[model_key]['decoder'] = decoder_file
     
@@ -186,7 +251,8 @@ def discover_models_with_channels(model_dir: str = './saved_models/') -> List[Di
         filename = os.path.basename(transition_file)
         parsed = _parse_model_filename_with_channels(filename)
         if parsed:
-            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], parsed['n_channels'])
+            n_channels = parsed.get('n_channels')
+            model_key = (parsed['run_id'], parsed['batch_size'], parsed['latent_dim'], parsed['n_steps'], n_channels)
             if model_key in model_sets:
                 model_sets[model_key]['transition'] = transition_file
     
@@ -197,7 +263,13 @@ def discover_models_with_channels(model_dir: str = './saved_models/') -> List[Di
             complete_sets.append(model_set)
     
     # Sort by run_id, then batch_size, latent_dim, n_steps, n_channels
-    complete_sets.sort(key=lambda x: (x['run_id'], x['batch_size'], x['latent_dim'], x['n_steps'], x['n_channels']))
+    complete_sets.sort(key=lambda x: (
+        x.get('run_id', ''),
+        x.get('batch_size', 0),
+        x.get('latent_dim', 0),
+        x.get('n_steps', 0),
+        x.get('n_channels') if x.get('n_channels') is not None else 0
+    ))
     
     if not complete_sets:
         print(f"⚠️ No complete model sets found in {model_dir}")
@@ -405,6 +477,18 @@ def load_model_and_config(model_info: Dict[str, Any], config_path: str,
                     elif len(final_conv_config) > 1:
                         # Update output channels to n_channels
                         final_conv_config[1] = n_channels
+        
+        # Update residual_blocks if present in model_info
+        if 'residual_blocks' in model_info:
+            if 'encoder' not in config.config:
+                config.config['encoder'] = {}
+            config.config['encoder']['residual_blocks'] = model_info['residual_blocks']
+        
+        # Update encoder_hidden_dims if present in model_info
+        if 'encoder_hidden_dims' in model_info:
+            if 'transition' not in config.config:
+                config.config['transition'] = {}
+            config.config['transition']['encoder_hidden_dims'] = model_info['encoder_hidden_dims']
         
         # Re-resolve dynamic values
         config._resolve_dynamic_values()
@@ -813,6 +897,92 @@ def cleanup_memory(my_rom=None, dashboard=None, loaded_data=None, config=None):
 
 
 # ============================================================================
+# WANDB LOGGING
+# ============================================================================
+
+def log_prediction_metrics_to_wandb(wandb_logger, model_info: Dict[str, Any], 
+                                    spatial_metrics: Dict[str, Dict[str, float]], 
+                                    timeseries_metrics: Dict[str, Dict[str, float]],
+                                    prediction_time: float, time_per_case: float,
+                                    data_file: str, n_channels: int) -> None:
+    """
+    Log prediction metrics to WandB.
+    
+    Args:
+        wandb_logger: WandB logger instance
+        model_info: Dictionary with model hyperparameters
+        spatial_metrics: Dictionary with spatial metrics (structure: {'training': {...}, 'testing': {...}})
+        timeseries_metrics: Dictionary with timeseries metrics (structure: {'training': {...}, 'testing': {...}})
+        prediction_time: Total prediction time in seconds
+        time_per_case: Time per case in seconds
+        data_file: Name of data file used
+        n_channels: Number of channels
+    """
+    if not wandb_logger.enabled:
+        return
+    
+    try:
+        metrics = {}
+        
+        # Log hyperparameters
+        metrics['prediction/hyperparameters/batch_size'] = model_info['batch_size']
+        metrics['prediction/hyperparameters/latent_dim'] = model_info['latent_dim']
+        metrics['prediction/hyperparameters/n_steps'] = model_info['n_steps']
+        metrics['prediction/hyperparameters/n_channels'] = n_channels
+        metrics['prediction/hyperparameters/run_id'] = model_info['run_id']
+        
+        # Log timing information
+        metrics['prediction/timing/total_seconds'] = prediction_time
+        metrics['prediction/timing/seconds_per_case'] = time_per_case
+        metrics['prediction/data_file'] = data_file
+        
+        # Log spatial metrics
+        for split in ['training', 'testing']:
+            if split in spatial_metrics:
+                for field_key, field_metrics in spatial_metrics[split].items():
+                    # field_key format: "FieldName - Layer N" or just "FieldName"
+                    # Extract field name and layer
+                    if ' - Layer ' in field_key:
+                        field_name, layer_part = field_key.rsplit(' - Layer ', 1)
+                        # Sanitize field name for wandb (remove spaces, special chars)
+                        safe_field_name = field_name.replace(' ', '_').replace('/', '_')
+                        for metric_name, metric_value in field_metrics.items():
+                            metrics[f'prediction/spatial/{safe_field_name}/layer_{layer_part}/{split}/{metric_name}'] = metric_value
+                    else:
+                        # No layer specified, use field name only
+                        safe_field_name = field_key.replace(' ', '_').replace('/', '_')
+                        for metric_name, metric_value in field_metrics.items():
+                            metrics[f'prediction/spatial/{safe_field_name}/{split}/{metric_name}'] = metric_value
+        
+        # Log timeseries metrics
+        for split in ['training', 'testing']:
+            if split in timeseries_metrics:
+                for group_key, group_metrics in timeseries_metrics[split].items():
+                    # group_key format: "GroupName - WellName" or just "GroupName"
+                    # Extract group name and well name
+                    if ' - ' in group_key:
+                        group_name, well_name = group_key.rsplit(' - ', 1)
+                        # Sanitize names for wandb
+                        safe_group_name = group_name.replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_')
+                        safe_well_name = well_name.replace(' ', '_').replace('/', '_')
+                        for metric_name, metric_value in group_metrics.items():
+                            metrics[f'prediction/timeseries/{safe_group_name}/{safe_well_name}/{split}/{metric_name}'] = metric_value
+                    else:
+                        # No well specified, use group name only
+                        safe_group_name = group_key.replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_')
+                        for metric_name, metric_value in group_metrics.items():
+                            metrics[f'prediction/timeseries/{safe_group_name}/{split}/{metric_name}'] = metric_value
+        
+        # Log all metrics at once
+        wandb_logger.run.log(metrics)
+        
+    except Exception as e:
+        print(f"   ⚠️ Warning: Failed to log metrics to WandB: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# ============================================================================
 # RESULTS STORAGE
 # ============================================================================
 
@@ -917,6 +1087,7 @@ def main():
         dashboard = None
         loaded_data = None
         config = None
+        wandb_logger = None
         
         try:
             # Get n_channels from model_info if available (from filename parsing), otherwise extract from weights
@@ -989,6 +1160,47 @@ def main():
             
             print(f"   ✅ Model loaded successfully")
             
+            # Initialize WandB logger for this prediction run
+            # Check if wandb is enabled (from config or global setting)
+            wandb_enabled = WANDB_ENABLED
+            wandb_project = WANDB_PROJECT
+            
+            # Try to read wandb settings from config if available
+            if config and 'runtime' in config.config and 'wandb' in config.config['runtime']:
+                config_wandb = config.config['runtime']['wandb']
+                # Use config settings if available, otherwise use defaults
+                if 'enable' in config_wandb:
+                    wandb_enabled = config_wandb['enable'] and WANDB_ENABLED  # Both must be True
+                if 'project' in config_wandb:
+                    wandb_project = config_wandb['project']
+            
+            if wandb_enabled:
+                try:
+                    # Create prediction run name
+                    prediction_run_name = f"prediction_{model_id}"
+                    
+                    # Update config with wandb settings
+                    if 'runtime' not in config.config:
+                        config.config['runtime'] = {}
+                    if 'wandb' not in config.config['runtime']:
+                        config.config['runtime']['wandb'] = {}
+                    
+                    config.config['runtime']['wandb']['enable'] = True
+                    config.config['runtime']['wandb']['project'] = wandb_project
+                    config.config['runtime']['wandb']['name'] = prediction_run_name
+                    config.config['runtime']['wandb']['tags'] = ['prediction', 'grid_search', 'E2C']
+                    config.config['runtime']['wandb']['notes'] = f'Prediction run for model {model_id}'
+                    
+                    # Initialize wandb logger
+                    wandb_logger = create_wandb_logger(config)
+                    if wandb_logger.enabled:
+                        print(f"   🌟 WandB initialized: {wandb_logger.run.url if hasattr(wandb_logger, 'run') else 'N/A'}")
+                except Exception as e:
+                    print(f"   ⚠️ Warning: Failed to initialize WandB: {e}")
+                    wandb_logger = None
+            else:
+                wandb_logger = None
+            
             # Generate predictions
             # Note: DATA_DIR should point to directory containing raw data files (batch_timeseries_data_*.h5, etc.)
             # This is used by generate_test_visualization_standalone to load spatial and timeseries data
@@ -1025,6 +1237,23 @@ def main():
             
             print(f"   ✅ Metrics calculated")
             
+            # Log metrics to WandB
+            if wandb_logger is not None and wandb_logger.enabled:
+                try:
+                    log_prediction_metrics_to_wandb(
+                        wandb_logger,
+                        model_info,
+                        spatial_metrics,
+                        timeseries_metrics,
+                        prediction_time,
+                        time_per_case,
+                        os.path.basename(data_file),
+                        n_channels
+                    )
+                    print(f"   ✅ Metrics logged to WandB")
+                except Exception as e:
+                    print(f"   ⚠️ Warning: Failed to log metrics to WandB: {e}")
+            
             # Store results
             all_results[model_id] = {
                 'run_id': model_info['run_id'],
@@ -1042,6 +1271,14 @@ def main():
             }
             
             print(f"   ✅ {model_id} completed successfully")
+            
+            # Finish WandB run
+            if wandb_logger is not None and wandb_logger.enabled:
+                try:
+                    wandb_logger.finish()
+                    print(f"   🏁 WandB run finished")
+                except Exception as e:
+                    print(f"   ⚠️ Warning: Failed to finish WandB run: {e}")
             
             # Save results after each run (incremental save - overwrites same file)
             save_results(all_results, OUTPUT_DIR, use_timestamp=False)
@@ -1065,6 +1302,12 @@ def main():
                 error_msg = f"Runtime error: {str(e)}"
                 print(f"   ❌ {error_msg}")
                 errors.append({'model_id': model_id, 'error': error_msg})
+                # Finish WandB run even on error
+                if wandb_logger is not None and wandb_logger.enabled:
+                    try:
+                        wandb_logger.finish()
+                    except:
+                        pass
                 cleanup_memory(my_rom=my_rom, dashboard=dashboard, loaded_data=loaded_data, config=config)
             import traceback
             traceback.print_exc()
@@ -1075,6 +1318,13 @@ def main():
             errors.append({'model_id': model_id, 'error': error_msg})
             import traceback
             traceback.print_exc()
+            
+            # Finish WandB run even on error
+            if wandb_logger is not None and wandb_logger.enabled:
+                try:
+                    wandb_logger.finish()
+                except:
+                    pass
             
             # Clean up memory even on error
             cleanup_memory(my_rom=my_rom, dashboard=dashboard, loaded_data=loaded_data, config=config)

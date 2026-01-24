@@ -37,7 +37,7 @@ data_preprocessing:
     verbose: true
     show_progress: true
 model:
-  latent_dim: 32
+  latent_dim: 128
   u_dim: 6
   n_channels: 2
   method: E2C
@@ -207,6 +207,7 @@ transition:
   encoder_hidden_dims:
   - 200
   - 200
+  - 200
   fno:
     width: 64
     modes_x: 8
@@ -234,8 +235,8 @@ transition:
     forward_mode: fno_only
     predict_mode: fno_only
 training:
-  epoch: 200
-  batch_size: 64
+  epoch: 400
+  batch_size: 8
   learning_rate: 0.0001
   nsteps: 2
   num_tsteps: 30
@@ -337,7 +338,7 @@ dynamic_loss_weighting:
     adaptation_rate: 0.1
 adversarial:
   enable: false
-  discriminator_learning_rate: 0.0001
+  discriminator_learning_rate: 1.0e-05
   discriminator_update_frequency: 1
 discriminator:
   enable: false

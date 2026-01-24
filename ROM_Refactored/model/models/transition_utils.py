@@ -14,13 +14,17 @@ def create_trans_encoder(total_input_dim, hidden_dims=[200, 200]):
     
     Args:
         total_input_dim: Total input dimension (latent_dim + 1 for dt)
-        hidden_dims: List of hidden layer dimensions
+        hidden_dims: List of hidden layer dimensions (default: [200, 200])
         
     Returns:
         Sequential encoder network
     """
     layers = []
     prev_dim = total_input_dim
+    
+    # Handle None or missing hidden_dims by using default
+    if hidden_dims is None:
+        hidden_dims = [200, 200]
     
     # Add hidden layers
     for hidden_dim in hidden_dims:

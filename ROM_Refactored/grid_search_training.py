@@ -35,13 +35,91 @@ from model.training.rom_wrapper import ROMWithE2C
 
 # Define hyperparameter ranges
 # batch_size, latent_dim, n_steps, and n_channels are varied
-# learning_rate and lr_scheduler use default values from config
+# learning_rate is fixed (uses config default)
 HYPERPARAMETER_GRID = {
-    'batch_size': [8,16,32,64,128,256],
-    'latent_dim': [16,32,64,128,256],
+    # Existing parameters
+    'batch_size': [64],
     'n_steps': [2],  # Available processed data files
-    'n_channels': [2,4]  # Number of channels (2 for SW/SG, 4 for SW/SG/PRES/PERMI, etc.)
-    # learning_rate and lr_scheduler will use config defaults
+    'n_channels': [4],  # Number of channels (2 for SW/SG, 4 for SW/SG/PRES/PERMI, etc.)
+    'latent_dim': [128],
+    # Learning rate scheduler
+    'lr_scheduler_type': ['fixed'], #, 'reduce_on_plateau', 'exponential_decay', 'step_decay', 'cosine_annealing'],
+    
+    # Architecture parameters
+    'residual_blocks': [3],  # Number of residual blocks in encoder/decoder
+    'encoder_hidden_dims': [[300, 300, 300]],  # Transition encoder hidden dimensions
+    
+    # Dynamic loss weighting
+    'dynamic_loss_weighting_enable': [False],
+    'dynamic_loss_weighting_method': ['gradnorm', 'uncertainty', 'dwa'],  # Only when enabled=True
+    
+    # Adversarial training
+    'adversarial_enable': [False],
+}
+
+# Nested parameter grids (applied conditionally based on parent parameter values)
+LR_SCHEDULER_PARAMS = {
+    'reduce_on_plateau': {
+        'factor': [0.5],
+        #'patience': [5],
+       # 'threshold': [1e-4],
+        #'cooldown': [3],
+       # 'min_lr': [1e-7]
+    },
+    'exponential_decay': {
+        'gamma': [0.9]
+    },
+    'step_decay': {
+        'step_size': [50],
+        #'gamma': [0.5]
+    },
+    'cosine_annealing': {
+        'T_max': [20],
+        #'eta_min': [1e-6]
+    },
+    'cyclic': {
+        'base_lr': [1e-5],
+        #'max_lr': [1e-3],
+        #'step_size_up': [500],
+        #'gamma': [1.0],
+       # 'base_momentum': [0.8],
+       # 'max_momentum': [0.9]
+    },
+    'one_cycle': {
+        'max_lr': [1e-3],
+        #'pct_start': [0.3],
+        #'div_factor': [25.0],
+        #'final_div_factor': [1e4],
+        #'base_momentum': [0.85],
+        #'max_momentum': [0.95]
+    }
+}
+
+DYNAMIC_LOSS_WEIGHTING_PARAMS = {
+    'gradnorm': {
+        'alpha': [0.12, 0.25],
+        'learning_rate': [0.025, 0.05]
+    },
+    'uncertainty': {
+        'log_variance_init': [0.0, -1.0]
+    },
+    'dwa': {
+        'temperature': [2.0, 3.0],
+        'window_size': [10, 15]
+    },
+    'yoto': {
+        'alpha': [0.5, 0.7],
+        'beta': [0.5, 0.7]
+    },
+    'adaptive_curriculum': {
+        'initial_weights': [[1.0, 1.0, 1.0, 1.0, 1.0]],
+        'adaptation_rate': [0.1, 0.2]
+    }
+}
+
+ADVERSARIAL_PARAMS = {
+    'discriminator_learning_rate': [1e-5],
+    'discriminator_update_frequency': [2]
 }
 
 # Channel names mapping based on n_channels
@@ -174,22 +252,195 @@ def get_channel_names(n_channels: int) -> List[str]:
         return [f'Channel_{i}' for i in range(n_channels)]
 
 
+def validate_hyperparameter_combination(hyperparams: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a hyperparameter combination is valid.
+    
+    Args:
+        hyperparams: Dictionary of hyperparameters
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Validate scheduler parameters are only included when scheduler type is not 'fixed'
+    scheduler_type = hyperparams.get('lr_scheduler_type', 'fixed')
+    if scheduler_type == 'fixed':
+        # Fixed scheduler doesn't need additional parameters
+        pass
+    elif scheduler_type not in LR_SCHEDULER_PARAMS:
+        return False, f"Unknown scheduler type: {scheduler_type}"
+    
+    # Validate dynamic loss weighting parameters
+    dlw_enable = hyperparams.get('dynamic_loss_weighting_enable', False)
+    dlw_method = hyperparams.get('dynamic_loss_weighting_method', 'gradnorm')
+    if dlw_enable and dlw_method not in DYNAMIC_LOSS_WEIGHTING_PARAMS:
+        return False, f"Unknown dynamic loss weighting method: {dlw_method}"
+    
+    # Validate adversarial parameters
+    adv_enable = hyperparams.get('adversarial_enable', False)
+    if adv_enable:
+        # Adversarial parameters will be applied from ADVERSARIAL_PARAMS
+        pass
+    
+    return True, None
+
+
 def generate_hyperparameter_combinations() -> List[Dict[str, Any]]:
     """
-    Generate all combinations of hyperparameters.
+    Generate all combinations of hyperparameters, including conditional nested parameters.
     
     Returns:
-        List of dictionaries, each containing a hyperparameter set
+        List of dictionaries, each containing a hyperparameter set with nested parameters expanded
     """
-    keys = HYPERPARAMETER_GRID.keys()
-    values = HYPERPARAMETER_GRID.values()
+    # Create a filtered grid that excludes dynamic_loss_weighting_method when enable is False
+    filtered_grid = HYPERPARAMETER_GRID.copy()
+    
+    # Check if dynamic_loss_weighting_enable contains any True values
+    dlw_enable_values = filtered_grid.get('dynamic_loss_weighting_enable', [False])
+    has_enabled_dlw = any(dlw_enable_values) if isinstance(dlw_enable_values, list) else bool(dlw_enable_values)
+    
+    # If dynamic loss weighting is never enabled, remove method from grid to avoid unnecessary combinations
+    if not has_enabled_dlw and 'dynamic_loss_weighting_method' in filtered_grid:
+        # Remove method from grid, but keep a default value for when enable=False
+        filtered_grid = {k: v for k, v in filtered_grid.items() if k != 'dynamic_loss_weighting_method'}
+    
+    # Base grid keys and values
+    base_keys = list(filtered_grid.keys())
+    base_values = list(filtered_grid.values())
     
     combinations = []
-    for combination in itertools.product(*values):
-        hyperparams = dict(zip(keys, combination))
-        combinations.append(hyperparams)
+    
+    # Generate base combinations
+    for base_combination in itertools.product(*base_values):
+        base_hyperparams = dict(zip(base_keys, base_combination))
+        
+        # If dynamic_loss_weighting_method was removed, set a default when enable=False
+        if 'dynamic_loss_weighting_method' not in base_hyperparams:
+            base_hyperparams['dynamic_loss_weighting_method'] = 'gradnorm'  # Default, won't be used when enable=False
+        
+        # Expand conditional parameters based on base hyperparameters
+        expanded_combinations = expand_conditional_parameters(base_hyperparams)
+        
+        # Validate and add each expanded combination
+        for expanded in expanded_combinations:
+            is_valid, error_msg = validate_hyperparameter_combination(expanded)
+            if is_valid:
+                combinations.append(expanded)
+            else:
+                print(f"⚠️ Skipping invalid combination: {error_msg}")
     
     return combinations
+
+
+def expand_conditional_parameters(base_hyperparams: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Expand conditional nested parameters based on base hyperparameters.
+    
+    Args:
+        base_hyperparams: Base hyperparameter dictionary
+        
+    Returns:
+        List of expanded hyperparameter dictionaries
+    """
+    expanded = [base_hyperparams.copy()]
+    
+    # Expand scheduler parameters
+    scheduler_type = base_hyperparams.get('lr_scheduler_type', 'fixed')
+    if scheduler_type != 'fixed' and scheduler_type in LR_SCHEDULER_PARAMS:
+        scheduler_params = LR_SCHEDULER_PARAMS[scheduler_type]
+        scheduler_keys = list(scheduler_params.keys())
+        scheduler_values = list(scheduler_params.values())
+        
+        scheduler_combinations = []
+        for combo in itertools.product(*scheduler_values):
+            scheduler_dict = dict(zip(scheduler_keys, combo))
+            scheduler_combinations.append(scheduler_dict)
+        
+        # Create new expanded combinations with scheduler params
+        new_expanded = []
+        for base in expanded:
+            for scheduler_combo in scheduler_combinations:
+                new_base = base.copy()
+                new_base['lr_scheduler_params'] = scheduler_combo
+                new_expanded.append(new_base)
+        expanded = new_expanded
+    
+    # Expand dynamic loss weighting parameters
+    dlw_enable = base_hyperparams.get('dynamic_loss_weighting_enable', False)
+    dlw_method = base_hyperparams.get('dynamic_loss_weighting_method', 'gradnorm')
+    
+    if dlw_enable and dlw_method in DYNAMIC_LOSS_WEIGHTING_PARAMS:
+        dlw_params = DYNAMIC_LOSS_WEIGHTING_PARAMS[dlw_method]
+        dlw_keys = list(dlw_params.keys())
+        dlw_values = list(dlw_params.values())
+        
+        dlw_combinations = []
+        for combo in itertools.product(*dlw_values):
+            dlw_dict = dict(zip(dlw_keys, combo))
+            dlw_combinations.append(dlw_dict)
+        
+        # Create new expanded combinations with DLW params
+        new_expanded = []
+        for base in expanded:
+            for dlw_combo in dlw_combinations:
+                new_base = base.copy()
+                new_base['dynamic_loss_weighting_params'] = dlw_combo
+                new_expanded.append(new_base)
+        expanded = new_expanded
+    
+    # Expand adversarial parameters
+    adv_enable = base_hyperparams.get('adversarial_enable', False)
+    
+    if adv_enable:
+        adv_keys = list(ADVERSARIAL_PARAMS.keys())
+        adv_values = list(ADVERSARIAL_PARAMS.values())
+        
+        adv_combinations = []
+        for combo in itertools.product(*adv_values):
+            adv_dict = dict(zip(adv_keys, combo))
+            adv_combinations.append(adv_dict)
+        
+        # Create new expanded combinations with adversarial params
+        new_expanded = []
+        for base in expanded:
+            for adv_combo in adv_combinations:
+                new_base = base.copy()
+                new_base['adversarial_params'] = adv_combo
+                new_expanded.append(new_base)
+        expanded = new_expanded
+    
+    return expanded
+
+
+def format_encoder_hidden_dims(encoder_hidden_dims: List[int]) -> str:
+    """Format encoder hidden dims list as string."""
+    return '-'.join(map(str, encoder_hidden_dims))
+
+
+def format_scheduler_abbreviation(scheduler_type: str) -> str:
+    """Get abbreviation for scheduler type."""
+    abbrev_map = {
+        'fixed': 'fix',
+        'reduce_on_plateau': 'rop',
+        'exponential_decay': 'exp',
+        'step_decay': 'step',
+        'cosine_annealing': 'cos',
+        'cyclic': 'cyc',
+        'one_cycle': '1cyc'
+    }
+    return abbrev_map.get(scheduler_type, scheduler_type[:4])
+
+
+def format_dlw_abbreviation(method: str) -> str:
+    """Get abbreviation for dynamic loss weighting method."""
+    abbrev_map = {
+        'gradnorm': 'grad',
+        'uncertainty': 'unc',
+        'dwa': 'dwa',
+        'yoto': 'yoto',
+        'adaptive_curriculum': 'acur'
+    }
+    return abbrev_map.get(method, method[:4])
 
 
 def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
@@ -197,14 +448,46 @@ def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
     Create a unique run ID based on hyperparameters.
     
     Args:
-        hyperparams: Dictionary of hyperparameters (batch_size, latent_dim, n_steps, n_channels)
+        hyperparams: Dictionary of hyperparameters
         run_index: Index of the run
         
     Returns:
         String run ID
     """
-    return (f"run{run_index:04d}_bs{hyperparams['batch_size']}_"
-            f"ld{hyperparams['latent_dim']}_ns{hyperparams['n_steps']}_ch{hyperparams['n_channels']}")
+    parts = [f"run{run_index:04d}"]
+    
+    # Base parameters
+    parts.append(f"bs{hyperparams['batch_size']}")
+    parts.append(f"ld{hyperparams['latent_dim']}")
+    parts.append(f"ns{hyperparams['n_steps']}")
+    parts.append(f"ch{hyperparams['n_channels']}")
+    
+    # Scheduler
+    scheduler_type = hyperparams.get('lr_scheduler_type', 'fixed')
+    parts.append(f"sch{format_scheduler_abbreviation(scheduler_type)}")
+    
+    # Residual blocks
+    if 'residual_blocks' in hyperparams:
+        parts.append(f"rb{hyperparams['residual_blocks']}")
+    
+    # Encoder hidden dims
+    if 'encoder_hidden_dims' in hyperparams:
+        ehd_str = format_encoder_hidden_dims(hyperparams['encoder_hidden_dims'])
+        parts.append(f"ehd{ehd_str}")
+    
+    # Dynamic loss weighting
+    dlw_enable = hyperparams.get('dynamic_loss_weighting_enable', False)
+    if dlw_enable:
+        dlw_method = hyperparams.get('dynamic_loss_weighting_method', 'gradnorm')
+        parts.append(f"dlw{format_dlw_abbreviation(dlw_method)}")
+    else:
+        parts.append("dlwFalse")
+    
+    # Adversarial
+    adv_enable = hyperparams.get('adversarial_enable', False)
+    parts.append(f"adv{adv_enable}")
+    
+    return '_'.join(parts)
 
 
 def create_run_name(hyperparams: Dict[str, Any], run_index: int) -> str:
@@ -212,14 +495,45 @@ def create_run_name(hyperparams: Dict[str, Any], run_index: int) -> str:
     Create a human-readable run name for wandb.
     
     Args:
-        hyperparams: Dictionary of hyperparameters (batch_size, latent_dim, n_steps, n_channels)
+        hyperparams: Dictionary of hyperparameters
         run_index: Index of the run
         
     Returns:
         String run name
     """
-    return (f"bs{hyperparams['batch_size']}_ld{hyperparams['latent_dim']}_"
-            f"ns{hyperparams['n_steps']}_ch{hyperparams['n_channels']}")
+    parts = []
+    
+    # Base parameters
+    parts.append(f"bs{hyperparams['batch_size']}")
+    parts.append(f"ld{hyperparams['latent_dim']}")
+    parts.append(f"ns{hyperparams['n_steps']}")
+    parts.append(f"ch{hyperparams['n_channels']}")
+    
+    # Scheduler (abbreviated)
+    scheduler_type = hyperparams.get('lr_scheduler_type', 'fixed')
+    parts.append(f"sch{format_scheduler_abbreviation(scheduler_type)}")
+    
+    # Residual blocks
+    if 'residual_blocks' in hyperparams:
+        parts.append(f"rb{hyperparams['residual_blocks']}")
+    
+    # Encoder hidden dims
+    if 'encoder_hidden_dims' in hyperparams:
+        ehd_str = format_encoder_hidden_dims(hyperparams['encoder_hidden_dims'])
+        parts.append(f"ehd{ehd_str}")
+    
+    # Dynamic loss weighting (only if enabled)
+    dlw_enable = hyperparams.get('dynamic_loss_weighting_enable', False)
+    if dlw_enable:
+        dlw_method = hyperparams.get('dynamic_loss_weighting_method', 'gradnorm')
+        parts.append(f"dlw{format_dlw_abbreviation(dlw_method)}")
+    
+    # Adversarial (only if enabled)
+    adv_enable = hyperparams.get('adversarial_enable', False)
+    if adv_enable:
+        parts.append("adv")
+    
+    return '_'.join(parts)
 
 
 def create_run_model_filename(component: str, hyperparams: Dict[str, Any], 
@@ -229,14 +543,16 @@ def create_run_model_filename(component: str, hyperparams: Dict[str, Any],
     
     Args:
         component: Model component ('encoder', 'decoder', 'transition')
-        hyperparams: Dictionary of hyperparameters (batch_size, latent_dim, n_steps, n_channels)
+        hyperparams: Dictionary of hyperparameters
         num_train: Number of training samples
         num_well: Number of wells
-        run_id: Unique run ID
+        run_id: Unique run ID (already includes all parameters)
         
     Returns:
         Formatted filename string
     """
+    # Use run_id which already contains all parameter information
+    # Keep base parameters for backward compatibility
     return (f"e2co_{component}_grid_"
             f"bs{hyperparams['batch_size']}_"
             f"ld{hyperparams['latent_dim']}_"
@@ -255,7 +571,7 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
     
     Args:
         config_path: Path to config file
-        hyperparams: Dictionary of hyperparameters to apply (batch_size, latent_dim, n_steps, n_channels)
+        hyperparams: Dictionary of hyperparameters to apply
         
     Returns:
         New Config object with hyperparameters applied
@@ -267,20 +583,18 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
     if 'learning_rate' in hyperparams:
         raise ValueError("learning_rate should not be in hyperparams - it must remain fixed")
     
-    # Update training hyperparameters
-    # Update batch_size and n_steps (learning_rate uses config default and is FIXED)
-    config.set('training.batch_size', hyperparams['batch_size'])
-    config.set('training.nsteps', hyperparams['n_steps'])
-    
     # Ensure learning rate is fixed (read from config, do not modify)
     original_lr = config.training['learning_rate']
+    
+    # Update training hyperparameters
+    config.set('training.batch_size', hyperparams['batch_size'])
+    config.set('training.nsteps', hyperparams['n_steps'])
     
     # Update model hyperparameters
     config.set('model.latent_dim', hyperparams['latent_dim'])
     
     # Update n_channels related config (matching dashboard logic)
     n_channels = hyperparams['n_channels']
-    # Update model.n_channels
     if 'model' not in config.config:
         config.config['model'] = {}
     config.config['model']['n_channels'] = n_channels
@@ -295,28 +609,169 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
         if 'conv1' in config.config['encoder']['conv_layers']:
             conv1 = config.config['encoder']['conv_layers']['conv1']
             if isinstance(conv1, list) and len(conv1) > 0:
-                # Update first element which is input channels
                 conv1[0] = n_channels
     
-    # Update decoder final_conv output channels if exists (matching dashboard logic)
+    # Update decoder final_conv output channels if exists
     if 'decoder' in config.config and 'deconv_layers' in config.config['decoder']:
         if 'final_conv' in config.config['decoder']['deconv_layers']:
             final_conv_config = config.config['decoder']['deconv_layers']['final_conv']
-            if isinstance(final_conv_config, list) and len(final_conv_config) > 0:
-                # Check if second element is null (which means n_channels) - keep as None
-                if len(final_conv_config) > 1 and final_conv_config[1] is None:
-                    # Keep as None, it will be auto-filled
-                    pass
-                elif len(final_conv_config) > 1:
-                    # Update output channels to n_channels
+            if isinstance(final_conv_config, list) and len(final_conv_config) > 1:
+                if final_conv_config[1] is not None:
                     final_conv_config[1] = n_channels
     
-    # Validate scheduler is not step_decay (ensure fixed learning rate)
-    scheduler_type = config.learning_rate_scheduler.get('type', 'step_decay')
-    if scheduler_type == 'step_decay':
-        # Override to constant scheduler to ensure fixed learning rate
-        config.set('learning_rate_scheduler.type', 'constant')
-        scheduler_type = 'constant'
+    # Update learning rate scheduler
+    scheduler_type = hyperparams.get('lr_scheduler_type', 'fixed')
+    if scheduler_type == 'fixed':
+        scheduler_type = 'constant'  # Map 'fixed' to 'constant' for config compatibility
+    
+    config.set('learning_rate_scheduler.enable', scheduler_type != 'constant')
+    config.set('learning_rate_scheduler.type', scheduler_type)
+    
+    # Apply scheduler-specific parameters
+    if scheduler_type != 'constant' and 'lr_scheduler_params' in hyperparams:
+        scheduler_params = hyperparams['lr_scheduler_params']
+        
+        if scheduler_type == 'reduce_on_plateau':
+            if 'factor' in scheduler_params:
+                config.set('learning_rate_scheduler.reduce_on_plateau.factor', scheduler_params['factor'])
+            if 'patience' in scheduler_params:
+                config.set('learning_rate_scheduler.reduce_on_plateau.patience', scheduler_params['patience'])
+            if 'threshold' in scheduler_params:
+                config.set('learning_rate_scheduler.reduce_on_plateau.threshold', scheduler_params['threshold'])
+            if 'cooldown' in scheduler_params:
+                config.set('learning_rate_scheduler.reduce_on_plateau.cooldown', scheduler_params['cooldown'])
+            if 'min_lr' in scheduler_params:
+                config.set('learning_rate_scheduler.reduce_on_plateau.min_lr', scheduler_params['min_lr'])
+        
+        elif scheduler_type == 'exponential_decay':
+            if 'gamma' in scheduler_params:
+                config.set('learning_rate_scheduler.exponential_decay.gamma', scheduler_params['gamma'])
+        
+        elif scheduler_type == 'step_decay':
+            if 'step_size' in scheduler_params:
+                config.set('learning_rate_scheduler.step_decay.step_size', scheduler_params['step_size'])
+            if 'gamma' in scheduler_params:
+                config.set('learning_rate_scheduler.step_decay.gamma', scheduler_params['gamma'])
+        
+        elif scheduler_type == 'cosine_annealing':
+            if 'T_max' in scheduler_params:
+                config.set('learning_rate_scheduler.cosine_annealing.T_max', scheduler_params['T_max'])
+            if 'eta_min' in scheduler_params:
+                config.set('learning_rate_scheduler.cosine_annealing.eta_min', scheduler_params['eta_min'])
+        
+        elif scheduler_type == 'cyclic':
+            if 'base_lr' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.base_lr', scheduler_params['base_lr'])
+            if 'max_lr' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.max_lr', scheduler_params['max_lr'])
+            if 'step_size_up' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.step_size_up', scheduler_params['step_size_up'])
+            if 'gamma' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.gamma', scheduler_params['gamma'])
+            if 'base_momentum' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.base_momentum', scheduler_params['base_momentum'])
+            if 'max_momentum' in scheduler_params:
+                config.set('learning_rate_scheduler.cyclic.max_momentum', scheduler_params['max_momentum'])
+        
+        elif scheduler_type == 'one_cycle':
+            if 'max_lr' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.max_lr', scheduler_params['max_lr'])
+            if 'pct_start' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.pct_start', scheduler_params['pct_start'])
+            if 'div_factor' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.div_factor', scheduler_params['div_factor'])
+            if 'final_div_factor' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.final_div_factor', scheduler_params['final_div_factor'])
+            if 'base_momentum' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.base_momentum', scheduler_params['base_momentum'])
+            if 'max_momentum' in scheduler_params:
+                config.set('learning_rate_scheduler.one_cycle.max_momentum', scheduler_params['max_momentum'])
+    
+    # Update residual blocks
+    if 'residual_blocks' in hyperparams:
+        if 'encoder' not in config.config:
+            config.config['encoder'] = {}
+        config.config['encoder']['residual_blocks'] = hyperparams['residual_blocks']
+    
+    # Update encoder hidden dimensions
+    if 'encoder_hidden_dims' in hyperparams:
+        if 'transition' not in config.config:
+            config.config['transition'] = {}
+        config.config['transition']['encoder_hidden_dims'] = hyperparams['encoder_hidden_dims']
+    
+    # Update dynamic loss weighting
+    dlw_enable = hyperparams.get('dynamic_loss_weighting_enable', False)
+    if 'dynamic_loss_weighting' not in config.config:
+        config.config['dynamic_loss_weighting'] = {}
+    
+    config.config['dynamic_loss_weighting']['enable'] = dlw_enable
+    
+    if dlw_enable:
+        dlw_method = hyperparams.get('dynamic_loss_weighting_method', 'gradnorm')
+        config.config['dynamic_loss_weighting']['method'] = dlw_method
+        
+        # Apply method-specific parameters
+        if 'dynamic_loss_weighting_params' in hyperparams:
+            dlw_params = hyperparams['dynamic_loss_weighting_params']
+            
+            if dlw_method == 'gradnorm':
+                if 'alpha' in dlw_params:
+                    config.config['dynamic_loss_weighting']['gradnorm'] = config.config['dynamic_loss_weighting'].get('gradnorm', {})
+                    config.config['dynamic_loss_weighting']['gradnorm']['alpha'] = dlw_params['alpha']
+                if 'learning_rate' in dlw_params:
+                    config.config['dynamic_loss_weighting']['gradnorm'] = config.config['dynamic_loss_weighting'].get('gradnorm', {})
+                    config.config['dynamic_loss_weighting']['gradnorm']['learning_rate'] = dlw_params['learning_rate']
+            
+            elif dlw_method == 'uncertainty':
+                if 'log_variance_init' in dlw_params:
+                    config.config['dynamic_loss_weighting']['uncertainty'] = config.config['dynamic_loss_weighting'].get('uncertainty', {})
+                    config.config['dynamic_loss_weighting']['uncertainty']['log_variance_init'] = dlw_params['log_variance_init']
+            
+            elif dlw_method == 'dwa':
+                if 'temperature' in dlw_params:
+                    config.config['dynamic_loss_weighting']['dwa'] = config.config['dynamic_loss_weighting'].get('dwa', {})
+                    config.config['dynamic_loss_weighting']['dwa']['temperature'] = dlw_params['temperature']
+                if 'window_size' in dlw_params:
+                    config.config['dynamic_loss_weighting']['dwa'] = config.config['dynamic_loss_weighting'].get('dwa', {})
+                    config.config['dynamic_loss_weighting']['dwa']['window_size'] = dlw_params['window_size']
+            
+            elif dlw_method == 'yoto':
+                if 'alpha' in dlw_params:
+                    config.config['dynamic_loss_weighting']['yoto'] = config.config['dynamic_loss_weighting'].get('yoto', {})
+                    config.config['dynamic_loss_weighting']['yoto']['alpha'] = dlw_params['alpha']
+                if 'beta' in dlw_params:
+                    config.config['dynamic_loss_weighting']['yoto'] = config.config['dynamic_loss_weighting'].get('yoto', {})
+                    config.config['dynamic_loss_weighting']['yoto']['beta'] = dlw_params['beta']
+            
+            elif dlw_method == 'adaptive_curriculum':
+                if 'initial_weights' in dlw_params:
+                    config.config['dynamic_loss_weighting']['adaptive_curriculum'] = config.config['dynamic_loss_weighting'].get('adaptive_curriculum', {})
+                    config.config['dynamic_loss_weighting']['adaptive_curriculum']['initial_weights'] = dlw_params['initial_weights']
+                if 'adaptation_rate' in dlw_params:
+                    config.config['dynamic_loss_weighting']['adaptive_curriculum'] = config.config['dynamic_loss_weighting'].get('adaptive_curriculum', {})
+                    config.config['dynamic_loss_weighting']['adaptive_curriculum']['adaptation_rate'] = dlw_params['adaptation_rate']
+    
+    # Update adversarial training
+    adv_enable = hyperparams.get('adversarial_enable', False)
+    if 'adversarial' not in config.config:
+        config.config['adversarial'] = {}
+    
+    config.config['adversarial']['enable'] = adv_enable
+    
+    if adv_enable:
+        # Apply adversarial parameters
+        if 'adversarial_params' in hyperparams:
+            adv_params = hyperparams['adversarial_params']
+            
+            if 'discriminator_learning_rate' in adv_params:
+                config.config['adversarial']['discriminator_learning_rate'] = adv_params['discriminator_learning_rate']
+            if 'discriminator_update_frequency' in adv_params:
+                config.config['adversarial']['discriminator_update_frequency'] = adv_params['discriminator_update_frequency']
+        
+        # Enable discriminator in config
+        if 'discriminator' not in config.config:
+            config.config['discriminator'] = {}
+        config.config['discriminator']['enable'] = True
     
     # Verify learning rate was not accidentally modified
     if config.training['learning_rate'] != original_lr:
@@ -564,14 +1019,22 @@ def run_single_training(config_path: str, hyperparams: Dict[str, Any], run_index
             'run_id': run_id,
             'run_name': run_name,
             'status': 'success',
-            **hyperparams,
+            **hyperparams,  # Includes all hyperparameters including nested ones
             'channel_names': get_channel_names(n_channels),
             'learning_rate': config.training['learning_rate'],  # From config default (FIXED)
-            'lr_scheduler': config.learning_rate_scheduler.get('type', 'constant'),  # Overridden to constant if was step_decay
+            'lr_scheduler': config.learning_rate_scheduler.get('type', 'constant'),
             'data_file': os.path.basename(data_filepath),
             **results,
             **model_paths
         }
+        
+        # Ensure nested parameters are included in results (for CSV serialization)
+        if 'lr_scheduler_params' not in run_result and 'lr_scheduler_params' in hyperparams:
+            run_result['lr_scheduler_params'] = hyperparams['lr_scheduler_params']
+        if 'dynamic_loss_weighting_params' not in run_result and 'dynamic_loss_weighting_params' in hyperparams:
+            run_result['dynamic_loss_weighting_params'] = hyperparams['dynamic_loss_weighting_params']
+        if 'adversarial_params' not in run_result and 'adversarial_params' in hyperparams:
+            run_result['adversarial_params'] = hyperparams['adversarial_params']
         
         return run_result
         
@@ -682,23 +1145,22 @@ def main():
     print("\n🚀 Starting grid search...")
     print("=" * 80)
     
-    # Get default learning_rate and lr_scheduler from config for display
+    # Get default learning_rate from config for display
     default_lr = base_config.training['learning_rate']
-    default_scheduler = base_config.learning_rate_scheduler.get('type', 'step_decay')
-    
-    # Ensure scheduler is not step_decay (will be overridden to constant in update_config_with_hyperparams)
-    if default_scheduler == 'step_decay':
-        print(f"\n⚠️  Note: Config has step_decay scheduler, but will be overridden to 'constant' to ensure fixed learning rate")
-        default_scheduler = 'constant'
     
     print(f"\n📋 Using fixed hyperparameters:")
     print(f"   Learning rate: {default_lr:.0e} (FIXED - from config, will not vary)")
-    print(f"   LR scheduler: {default_scheduler} (FIXED - ensures constant learning rate)")
     print(f"\n🔄 Varying hyperparameters:")
-    print(f"   Batch sizes: {HYPERPARAMETER_GRID['batch_size']}")
-    print(f"   Latent dimensions: {HYPERPARAMETER_GRID['latent_dim']}")
-    print(f"   N-steps: {HYPERPARAMETER_GRID['n_steps']}")
-    print(f"   N-channels: {HYPERPARAMETER_GRID['n_channels']}")
+    print(f"   Batch sizes: {HYPERPARAMETER_GRID.get('batch_size', [])}")
+    print(f"   Latent dimensions: {HYPERPARAMETER_GRID.get('latent_dim', [])}")
+    print(f"   N-steps: {HYPERPARAMETER_GRID.get('n_steps', [])}")
+    print(f"   N-channels: {HYPERPARAMETER_GRID.get('n_channels', [])}")
+    print(f"   LR Scheduler types: {HYPERPARAMETER_GRID.get('lr_scheduler_type', [])}")
+    print(f"   Residual blocks: {HYPERPARAMETER_GRID.get('residual_blocks', [])}")
+    print(f"   Encoder hidden dims: {HYPERPARAMETER_GRID.get('encoder_hidden_dims', [])}")
+    print(f"   Dynamic loss weighting enable: {HYPERPARAMETER_GRID.get('dynamic_loss_weighting_enable', [])}")
+    print(f"   Dynamic loss weighting methods: {HYPERPARAMETER_GRID.get('dynamic_loss_weighting_method', [])}")
+    print(f"   Adversarial training enable: {HYPERPARAMETER_GRID.get('adversarial_enable', [])}")
     print(f"   Channel names mapping: {CHANNEL_NAMES_MAP}")
     print("=" * 80)
     
@@ -707,8 +1169,19 @@ def main():
         print(f"   Batch size: {hyperparams['batch_size']}, "
               f"Latent dim: {hyperparams['latent_dim']}, "
               f"N-steps: {hyperparams['n_steps']}, "
-              f"LR: {default_lr:.0e} (default), "
-              f"Scheduler: {default_scheduler} (default)")
+              f"N-channels: {hyperparams['n_channels']}, "
+              f"LR: {default_lr:.0e} (fixed), "
+              f"Scheduler: {hyperparams.get('lr_scheduler_type', 'fixed')}")
+        
+        # Print additional parameters if present
+        if 'residual_blocks' in hyperparams:
+            print(f"   Residual blocks: {hyperparams['residual_blocks']}")
+        if 'encoder_hidden_dims' in hyperparams:
+            print(f"   Encoder hidden dims: {hyperparams['encoder_hidden_dims']}")
+        if hyperparams.get('dynamic_loss_weighting_enable', False):
+            print(f"   Dynamic loss weighting: {hyperparams.get('dynamic_loss_weighting_method', 'N/A')}")
+        if hyperparams.get('adversarial_enable', False):
+            print(f"   Adversarial training: enabled")
         
         result = run_single_training(config_path, hyperparams, idx, OUTPUT_DIR, processed_data_dir)
         
@@ -752,16 +1225,31 @@ def save_results(all_results: List[Dict], failed_runs: List[Dict],
     # Save CSV
     if all_results:
         csv_file = os.path.join(SUMMARY_DIR, f'grid_search_results_{timestamp}.csv')
-        fieldnames = ['run_id', 'run_name', 'status', 'batch_size', 'latent_dim', 'n_steps',
-                     'learning_rate', 'lr_scheduler', 'data_file', 'best_loss', 'best_observation_loss',
-                     'best_reconstruction_loss', 'final_loss', 'final_observation_loss',
-                     'final_reconstruction_loss', 'final_transition_loss', 'encoder', 'decoder', 'transition']
+        # Extended fieldnames to include new parameters
+        fieldnames = [
+            'run_id', 'run_name', 'status', 
+            'batch_size', 'latent_dim', 'n_steps', 'n_channels',
+            'lr_scheduler_type', 'lr_scheduler_params',
+            'residual_blocks', 'encoder_hidden_dims',
+            'dynamic_loss_weighting_enable', 'dynamic_loss_weighting_method', 'dynamic_loss_weighting_params',
+            'adversarial_enable', 'adversarial_params',
+            'learning_rate', 'data_file', 
+            'best_loss', 'best_observation_loss', 'best_reconstruction_loss',
+            'final_loss', 'final_observation_loss', 'final_reconstruction_loss', 'final_transition_loss',
+            'encoder', 'decoder', 'transition'
+        ]
         
         with open(csv_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for result in all_results:
-                row = {k: result.get(k, '') for k in fieldnames}
+                row = {}
+                for k in fieldnames:
+                    value = result.get(k, '')
+                    # Convert lists and dicts to strings for CSV
+                    if isinstance(value, (list, dict)):
+                        value = json.dumps(value) if value else ''
+                    row[k] = value
                 writer.writerow(row)
         
         print(f"   💾 Results saved: {json_file}, {csv_file}")
@@ -788,6 +1276,18 @@ def print_summary(all_results: List[Dict], failed_runs: List[Dict], total_runs: 
         print(f"   Best Total Loss: {best_total['run_name']} - Loss: {best_total['best_loss']:.6f}")
         print(f"   Best Observation Loss: {best_obs['run_name']} - Loss: {best_obs['best_observation_loss']:.6f}")
         print(f"   Best Reconstruction Loss: {best_recon['run_name']} - Loss: {best_recon['best_reconstruction_loss']:.6f}")
+        
+        # Print hyperparameter ranges used
+        print("\n📋 HYPERPARAMETER RANGES:")
+        print(f"   Batch sizes: {HYPERPARAMETER_GRID.get('batch_size', [])}")
+        print(f"   Latent dimensions: {HYPERPARAMETER_GRID.get('latent_dim', [])}")
+        print(f"   N-steps: {HYPERPARAMETER_GRID.get('n_steps', [])}")
+        print(f"   N-channels: {HYPERPARAMETER_GRID.get('n_channels', [])}")
+        print(f"   LR Schedulers: {HYPERPARAMETER_GRID.get('lr_scheduler_type', [])}")
+        print(f"   Residual blocks: {HYPERPARAMETER_GRID.get('residual_blocks', [])}")
+        print(f"   Encoder hidden dims: {HYPERPARAMETER_GRID.get('encoder_hidden_dims', [])}")
+        print(f"   Dynamic loss weighting: {HYPERPARAMETER_GRID.get('dynamic_loss_weighting_enable', [])}")
+        print(f"   Adversarial training: {HYPERPARAMETER_GRID.get('adversarial_enable', [])}")
         
         print("\n📁 Model files saved to:", OUTPUT_DIR)
         print("📊 Results saved to:", SUMMARY_DIR)
@@ -1004,7 +1504,15 @@ def validate_setup(config_path: str = 'config.yaml', test_single_run: bool = Fal
         test_hyperparams = {
             'batch_size': 16,
             'latent_dim': 64,
-            'n_steps': 2
+            'n_steps': 2,
+            'n_channels': 2,
+            'lr_scheduler_type': 'step_decay',
+            'lr_scheduler_params': {'step_size': 50, 'gamma': 0.5},
+            'residual_blocks': 3,
+            'encoder_hidden_dims': [200, 200],
+            'dynamic_loss_weighting_enable': False,
+            'dynamic_loss_weighting_method': 'gradnorm',
+            'adversarial_enable': False
         }
         
         updated_config = update_config_with_hyperparams(config_path, test_hyperparams)
@@ -1028,11 +1536,28 @@ def validate_setup(config_path: str = 'config.yaml', test_single_run: bool = Fal
         else:
             print(f"   ✅ N-steps updated: {updated_config.training['nsteps']}")
         
-        # Verify learning_rate and scheduler use defaults
-        print(f"   ✅ Learning rate (default): {updated_config.training['learning_rate']}")
-        # Get scheduler type (will be 'constant' if was 'step_decay')
+        # Verify new parameters
+        if updated_config.encoder.get('residual_blocks') != test_hyperparams['residual_blocks']:
+            errors.append("Residual blocks not updated correctly")
+            print(f"   ❌ Residual blocks update failed")
+        else:
+            print(f"   ✅ Residual blocks updated: {updated_config.encoder.get('residual_blocks')}")
+        
+        if updated_config.transition.get('encoder_hidden_dims') != test_hyperparams['encoder_hidden_dims']:
+            errors.append("Encoder hidden dims not updated correctly")
+            print(f"   ❌ Encoder hidden dims update failed")
+        else:
+            print(f"   ✅ Encoder hidden dims updated: {updated_config.transition.get('encoder_hidden_dims')}")
+        
         scheduler_type = updated_config.learning_rate_scheduler.get('type', 'constant')
-        print(f"   ✅ Scheduler: {scheduler_type} (overridden to constant if was step_decay)")
+        if scheduler_type != test_hyperparams['lr_scheduler_type']:
+            errors.append("Scheduler type not updated correctly")
+            print(f"   ❌ Scheduler type update failed")
+        else:
+            print(f"   ✅ Scheduler type updated: {scheduler_type}")
+        
+        # Verify learning_rate uses default
+        print(f"   ✅ Learning rate (default): {updated_config.training['learning_rate']}")
             
     except Exception as e:
         errors.append(f"Config update failed: {e}")
@@ -1062,10 +1587,18 @@ def validate_setup(config_path: str = 'config.yaml', test_single_run: bool = Fal
         try:
             # Use first n_steps value from grid, or default to 2
             test_n_steps = HYPERPARAMETER_GRID.get('n_steps', [2])[0]
+            test_n_channels = HYPERPARAMETER_GRID.get('n_channels', [2])[0]
             test_hyperparams = {
                 'batch_size': 8,  # Small batch for testing
                 'latent_dim': 32,  # Small latent dim for testing
-                'n_steps': test_n_steps
+                'n_steps': test_n_steps,
+                'n_channels': test_n_channels,
+                'lr_scheduler_type': 'fixed',  # Use fixed scheduler for test
+                'residual_blocks': 2,  # Small number for testing
+                'encoder_hidden_dims': [100, 100],  # Small dimensions for testing
+                'dynamic_loss_weighting_enable': False,  # Disable for test
+                'dynamic_loss_weighting_method': 'gradnorm',
+                'adversarial_enable': False  # Disable for test
             }
             
             # Temporarily reduce epochs for testing

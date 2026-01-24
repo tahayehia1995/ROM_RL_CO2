@@ -17,9 +17,11 @@ class LinearTransitionModel(nn.Module):
         self.u_dim = config['model']['u_dim']
         self.num_prob = config['data']['num_prod']
         self.num_inj = config['data']['num_inj']
+        # Get encoder_hidden_dims with default fallback
+        encoder_hidden_dims = config['transition'].get('encoder_hidden_dims', [200, 200])
         self.trans_encoder = create_trans_encoder(
             self.latent_dim + 1, 
-            config['transition']['encoder_hidden_dims']
+            encoder_hidden_dims
         )
         self.trans_encoder.apply(weights_init)
         
