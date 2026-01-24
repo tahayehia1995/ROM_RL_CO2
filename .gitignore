@@ -4,6 +4,7 @@ wandb/
 saved_models/
 ROM_Refactored/processed_data/
 timing_logs/
+grid_search_results/
 
 # Python cache files
 __pycache__/
@@ -33,6 +34,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv
 
 # IDE
 .vscode/
@@ -41,7 +43,28 @@ ENV/
 *.swo
 *~
 
+# Data files
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+checkpoints/
+
+# Logs and outputs
+*.log
+
 # OS
 .DS_Store
 Thumbs.db
 
+# Jupyter
+.ipynb_checkpoints/
+
+# Processed data (large files)
+processed_data/*.h5
+processed_data/*.json

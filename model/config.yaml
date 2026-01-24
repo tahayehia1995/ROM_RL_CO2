@@ -1,0 +1,298 @@
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+# Configuration for Part 2: E2CO Model Module
+# This config file contains all model architecture, training, and loss settings
+
+# ============================================================================
+# MODEL ARCHITECTURE PARAMETERS
+# ============================================================================
+model:
+  # Core model dimensions
+  latent_dim: 128       # Size of latent space representation | Higher=more capacity, slower training | Range: 32-128
+  u_dim: 6                    # Control input dimensions (3 gas injection + 3 water production) | Must match your well count
+  n_channels: 2               # Number of input channels (pressure, saturation) | Matches spatial field dimensions
+  method: 'E2C'               # Model type: 'E2C' for linear transition
+  sigma: 0.0                  # Noise parameter for variational components | 0.0=deterministic, >0=stochastic | Range: 0.0-0.1
+
+# ============================================================================
+# DATA DIMENSIONS & RESERVOIR GEOMETRY
+# ============================================================================
+data:
+  # Input tensor shape: [channels, X_grid, Y_grid, Z_grid]
+  input_shape: [2, 34, 16, 25]    # Reservoir grid dimensions | [pressure+saturation, X, Y, Z] | Must match your data
+  
+  # Well configuration
+  num_prod: 3                     # Number of production wells | Must match actual well count
+  num_inj: 3                      # Number of injection wells | Must match actual well count
+  
+  # Well locations (grid coordinates: [X, Y, Z])
+  # All wells penetrate all layers (Z=24 means full penetration)
+  # Valid ranges: X=[0,33], Y=[0,15], Z=[0,24]
+  well_locations:
+    injectors:
+      I1: [10, 12, 24]             # Injector 1 coordinates | [X, Y, Z] in grid cells | Must be within input_shape bounds
+      I2: [31, 13, 24]             # Injector 2 coordinates | Edge location for sweep efficiency
+      I4: [8, 1, 24]               # Injector 4 coordinates | Corner injection point
+    producers:
+      P1: [1, 11, 24]              # Producer 1 coordinates | Primary production well
+      P2: [16, 4, 24]             # Producer 2 coordinates | Central drainage point
+      P3: [18, 11, 24]             # Producer 3 coordinates | Secondary production well
+
+# ============================================================================
+# ENCODER ARCHITECTURE
+# ============================================================================
+encoder:
+  conv_layers:
+    conv1: [null, 16, [3, 3, 3], [2, 2, 2], [1, 1, 1]]    # null = n_channels (auto-filled) | First layer extracts basic features
+    conv2: [16, 32, [3, 3, 3], [1, 1, 1], [1, 1, 1]]      # Feature extraction | Doubles feature maps
+    conv3: [32, 64, [3, 3, 3], [2, 2, 2], [1, 1, 1]]      # Spatial downsampling | Reduces spatial resolution
+    conv4: [64, 128, [3, 3, 3], [1, 1, 1], [1, 1, 1]]     # Final feature maps | High-level features
+  residual_blocks: 3              # Number of ResNet-style blocks | Higher=more capacity | Range: 2-5
+  residual_channels: 128          # Channels in residual blocks | Should match final conv layer
+  flattened_size: 32256           # Size after flattening (calculated from output_dims)
+  output_dims: [128, 9, 4, 7]     # Output dimensions [channels, X, Y, Z] after CNN layers
+
+# ============================================================================
+# DECODER ARCHITECTURE
+# ============================================================================
+decoder:
+  deconv_layers:
+    deconv1: [128, 64, [3, 3, 3], [1, 1, 1], [1, 1, 1]]   # (128,9,4,7) → (64,9,4,7) | Reduce channels
+    deconv2: [64, 32, [4, 4, 4], [2, 2, 2], [1, 1, 1]]    # (64,9,4,7) → (32,18,8,14) | Spatial upsampling
+    deconv3: [32, 16, [3, 3, 3], [1, 1, 1], [1, 1, 1]]    # (32,18,8,14) → (16,18,8,14) | Feature refinement
+    deconv4: [16, 16, [4, 4, 4], [2, 2, 2], [2, 1, 3], [0, 0, 1]]    # (16,18,8,14) → (16,34,16,25) | Final upsampling with output_padding
+    final_conv: [16, null, [1, 1, 1], [1, 1, 1], [0, 0, 0]]  # (16,34,16,25) → (n_channels,34,16,25) | null=n_channels, final output
+  use_exact_dimensions: true      # Use exact output dimensions without cropping
+  crop_z_to: null                 # Crop Z dimension to this value if not using exact dimensions
+
+# ============================================================================
+# TRANSITION MODEL CONFIGURATION
+# ============================================================================
+transition:
+  type: 'linear'                   # Transition model type: 'linear', 'fno', 'hybrid_fno'
+  encoder_hidden_dims: [200, 200] # Hidden dimensions for linear transition encoder
+  
+  # FNO (Fourier Neural Operator) configuration
+  fno:
+    width: 64                      # Channel width for FNO layers
+    modes_x: 8                     # Fourier modes in X direction
+    modes_y: 8                     # Fourier modes in Y direction
+    modes_z: 4                     # Fourier modes in Z direction
+    n_layers: 4                    # Number of FNO layers
+    control_injection: 'spatial_encoding'  # Control injection method: 'spatial_encoding', 'well_specific_spatial', 'global_conditioning'
+    well_specific_spatial:
+      influence_radius: 3.0        # Radius of well influence
+      influence_function: 'gaussian' # Influence function: 'gaussian', 'exponential', 'linear', 'step'
+      influence_strength: 1.0       # Strength of influence
+      use_3d_influence: true        # Use 3D influence patterns
+      z_penetration_mode: 'full'    # Z penetration mode: 'full', 'partial'
+      normalization: 'max_normalize' # Normalization method
+      per_well_scaling: true        # Apply per-well scaling
+      injector_scaling: 1.2         # Scaling for injectors
+      producer_scaling: 0.8         # Scaling for producers
+      temporal_weighting: true      # Apply temporal weighting
+      model_interference: false     # Model well interference
+      interference_threshold: 5.0   # Threshold for interference
+  
+  # Hybrid FNO configuration
+  hybrid_fno:
+    fno_weight: 0.7                # Weight for FNO component
+    linear_weight: 0.3              # Weight for linear component
+    use_learned_blending: false     # Use learned blending weights
+    forward_mode: 'fno_only'        # Forward mode: 'fno_only', 'latent_only', 'blended'
+    predict_mode: 'fno_only'        # Prediction mode: 'fno_only', 'latent_only', 'blended'
+
+# ============================================================================
+# TRAINING HYPERPARAMETERS
+# ============================================================================
+training:
+  epoch: 200                         # Total number of training epochs | Higher=more training, longer time | Range: 100-1000
+  batch_size: 16                   # Batch size for training | Higher=more stable gradients, more memory | Range: 8-32 for FNO
+  learning_rate: 0.0001            # Adam optimizer learning rate | Lower=more stable, higher=faster | Range: 1e-5 to 1e-3
+  nsteps: 2                        # Number of prediction steps during training | Higher=longer sequences | Range: 1-5
+  num_tsteps: 30                  # Number of time steps for evaluation/testing | Number of prediction steps for evaluation
+
+# ============================================================================
+# LEARNING RATE SCHEDULING CONFIGURATION
+# ============================================================================
+learning_rate_scheduler:
+  enable: true                     # Set to false to use fixed learning rate | True=adaptive learning, False=constant
+  type: 'step_decay'               # Scheduler type: 'fixed', 'reduce_on_plateau', 'exponential_decay', 'step_decay', 'cosine_annealing', 'cyclic', 'one_cycle'
+  
+  reduce_on_plateau:
+    mode: 'min'                     # 'min' for loss, 'max' for accuracy | 'min'=minimize loss
+    factor: 0.5                     # Factor by which the learning rate will be reduced | Lower=smaller reductions | Range: 0.1-0.8
+    patience: 5                     # Number of epochs with no improvement before LR reduction | Higher=more patience | Range: 3-20
+    threshold: 1e-4                 # Threshold for measuring the new optimum | Lower=more sensitive | Range: 1e-6 to 1e-3
+    threshold_mode: 'rel'           # 'rel' or 'abs' - relative or absolute change | 'rel'=percentage, 'abs'=absolute
+    cooldown: 3                     # Number of epochs to wait before resuming normal operation | Higher=more stability | Range: 1-10
+    min_lr: 1e-7                    # Lower bound on the learning rate | Should be much smaller than initial LR
+    eps: 1e-8                       # Minimal decay applied to lr | Very small numerical constant
+    verbose: true                   # Print message when lr is reduced | True=informative, False=quiet
+  
+  exponential_decay:
+    gamma: 0.95                     # Multiplicative factor of learning rate decay | Higher=slower decay | Range: 0.9-0.99
+    
+  step_decay:
+    step_size: 100                  # Period of learning rate decay (in epochs) | Reduce LR every 50 epochs
+    gamma: 0.5                      # Multiplicative factor of learning rate decay | 0.1 = reduce by factor of 10
+    
+  cosine_annealing:
+    T_max: 20                       # Maximum number of iterations (usually total epochs) | Should match training duration
+    eta_min: 1e-6                   # Minimum learning rate | Very small final LR
+    
+  cyclic:
+    base_lr: 1e-5                   # Lower learning rate bound | Should be smaller than initial LR
+    max_lr: 1e-3                    # Upper learning rate bound | Should be higher than initial LR
+    step_size_up: 500                # Number of training iterations in the increasing half | Higher=longer cycles
+    step_size_down: null            # Number of training iterations in the decreasing half | null=same as step_size_up
+    mode: 'triangular'              # 'triangular', 'triangular2', 'exp_range' | triangular=linear, exp_range=exponential
+    gamma: 1.0                      # Constant in 'exp_range' scaling function | Only used if mode='exp_range'
+    scale_fn: null                  # Custom scaling function | null=use built-in
+    scale_mode: 'cycle'             # 'cycle' or 'iterations' | cycle=per cycle, iterations=per iteration
+    cycle_momentum: true            # If True, momentum is cycled inversely to learning rate | True=adaptive momentum
+    base_momentum: 0.8              # Lower momentum bound when cycle_momentum is True | Range: 0.8-0.9
+    max_momentum: 0.9                # Upper momentum bound when cycle_momentum is True | Range: 0.9-0.95
+    
+  one_cycle:
+    max_lr: 1e-3                    # Upper learning rate bound | Peak LR in the cycle
+    total_steps: null               # Total number of steps | null=calculate from epochs
+    epochs: null                    # Number of epochs | null=use training.epoch
+    steps_per_epoch: null           # Number of steps per epoch | null=calculate automatically
+    pct_start: 0.3                  # Percentage of cycle spent increasing the LR | Range: 0.1-0.5
+    anneal_strategy: 'cos'          # 'cos' or 'linear' | cos=smooth, linear=straight
+    cycle_momentum: true            # If True, momentum is cycled inversely to learning rate | True=adaptive momentum
+    base_momentum: 0.85             # Lower momentum bound | Range: 0.8-0.9
+    max_momentum: 0.95              # Upper momentum bound | Range: 0.9-0.98
+    div_factor: 25.0                # Determines initial LR via initial_lr = max_lr/div_factor | Higher=lower start
+    final_div_factor: 1e4           # Determines minimum LR via min_lr = initial_lr/final_div_factor | Higher=lower end
+    
+  discriminator:
+    enable: false                   # Use separate scheduler for discriminator | True=different discriminator LR schedule
+    type: 'fixed'                   # Same options as main scheduler | Usually same as main type
+    
+  logging:
+    log_lr_every_batch: false      # Log learning rate every batch | True=detailed but noisy
+    log_lr_every_epoch: true        # Log learning rate every epoch | True=track LR changes
+    log_scheduler_events: true       # Log when scheduler makes changes | True=informative
+    include_momentum: true          # Include momentum values in logging | True=complete picture
+
+# ============================================================================
+# LOSS FUNCTION WEIGHTS & SPATIAL ENHANCEMENT
+# ============================================================================
+loss:
+  enable_flux_loss: false          # Enable/disable fluid flow conservation loss | True=physics consistency, False=faster
+  enable_bhp_loss: false          # Enable/disable bottom hole pressure loss at wells | True=better well accuracy
+  enable_non_negative_loss: false  # Enable/disable non-negative constraints | True=physical constraints, False=faster
+  lambda_non_negative_loss: 1      # Weight for non-negative loss | Higher=stricter constraints | Range: 1-50
+  
+  lambda_reconstruction_loss: 1.0  # Weight for autoencoder reconstruction loss | Higher=better spatial accuracy | Range: 0.5-2.0
+  
+  enable_per_element_normalization: true   # Enable per-element loss normalization | CRITICAL FOR BALANCED TRAINING
+  reconstruction_variance: 1        # Assumed variance for reconstruction noise | Range: 0.001-1.0
+  
+  lambda_flux_loss: 0.001          # Weight for fluid flow conservation loss | Higher=better physics | Range: 0.0001-0.01
+  lambda_bhp_loss: 20.0            # Weight for bottom hole pressure loss at wells | Higher=better well accuracy | Range: 10-50
+  lambda_trans_loss: 1.0           # Weight for latent space transition consistency | Higher=better temporal consistency | Range: 5-20
+  lambda_yobs_loss: 1.0            # Weight for well observation matching loss | Higher=better well predictions | Range: 20-100
+  
+  channel_mapping:
+    pressure: 2                     # Channel index for pressure field | Must match your data structure
+    perm_x: 3                       # Channel index for permeability in X direction | For flux loss calculation
+    perm_y: 4                       # Channel index for permeability in Y direction | For flux loss calculation
+    perm_z: 5                       # Channel index for permeability in Z direction | For flux loss calculation
+    trans_x: 6                      # Channel index for transmissibilities in X direction | For flux loss calculation
+    trans_y: 7                      # Channel index for transmissibilities in Y direction | For flux loss calculation
+    trans_z: 8                      # Channel index for transmissibilities in Z direction | For flux loss calculation
+    use_precomputed_trans: false   # Set to True if transmissibilities are precomputed and available as channels
+
+# ============================================================================
+# DYNAMIC LOSS WEIGHTING CONFIGURATION
+# ============================================================================
+dynamic_loss_weighting:
+  enable: false                     # Enable dynamic loss weighting | True=adaptive weights, False=fixed weights
+  method: 'gradnorm'                # Method: 'gradnorm', 'uncertainty', 'dwa', 'yoto', 'adaptive_curriculum'
+  
+  gradnorm:
+    alpha: 0.12                     # Restoring force hyperparameter | Higher=more stable weights | Range: 0.1-0.5
+    learning_rate: 0.025           # Learning rate for weight parameters | Range: 0.01-0.1
+  
+  uncertainty:
+    log_variance_init: 0.0          # Initial log variance | Range: -2.0 to 2.0
+  
+  dwa:
+    temperature: 2.0                # Temperature parameter | Higher=smoother weight changes | Range: 1.0-5.0
+    window_size: 10                  # Window size for loss tracking | Range: 5-20
+  
+  yoto:
+    alpha: 0.5                      # Momentum parameter | Range: 0.1-0.9
+    beta: 0.5                       # Update rate | Range: 0.1-0.9
+  
+  adaptive_curriculum:
+    initial_weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # Initial weights for each loss component
+    adaptation_rate: 0.1            # Rate of weight adaptation | Range: 0.01-0.5
+
+# ============================================================================
+# ADVERSARIAL TRAINING (DISCRIMINATOR)
+# ============================================================================
+adversarial:
+  enable: false                     # Enable adversarial training with discriminator | True=GAN-style training
+  discriminator_learning_rate: 0.0001  # Learning rate for discriminator | Usually same as generator
+  discriminator_update_frequency: 1    # Update discriminator every N generator updates | Range: 1-5
+
+# ============================================================================
+# RUNTIME & HARDWARE SETTINGS
+# ============================================================================
+runtime:
+  device: 'auto'                    # Hardware selection: 'auto'=detect best, 'cuda'=GPU, 'cpu'=CPU only, 'mps'=Apple Silicon
+  print_interval: 5000               # Print training progress every N batches | Higher=less output | Range: 50-500
+  save_best_model: true            # Save model weights when validation loss improves | True=keep best model
+  best_model_criterion: 'total_loss'  # Criterion for best model: 'total_loss', 'observation_loss', 'reconstruction_loss'
+  verbose: false                    # Enable detailed logging | True=informative, False=quiet
+  
+  detailed_loss_logging:
+    enable: true                    # Enable detailed loss component printing | True=detailed debugging
+    frequency: 'final_only'         # When to print: 'batch'=every batch, 'epoch'=every epoch, 'final_only'=end only
+    epoch_interval: 20              # Print every N epochs (if frequency='epoch') | Higher=less frequent | Range: 1-20
+    batch_interval: 10             # Print every N batch intervals (if frequency='batch') | Higher=less frequent
+    include_evaluation: true        # Include evaluation loss components | True=complete picture, slower
+    include_lr_info: true           # Include learning rate information | True=track LR changes
+  
+  wandb:
+    enable: true                    # Enable W&B experiment tracking | True=cloud logging, False=local only
+    project: 'ROM-E2C'              # W&B project name
+    entity: null                     # W&B entity/team name | null=use default
+    name: null                       # Run name | null=auto-generate
+    tags: []                         # Tags for experiment organization
+    notes: ''                        # Notes/description for this run
+    config_file: 'config.yaml'       # Config file to log to W&B
+
+# ============================================================================
+# EXPERIMENT PARAMETERS
+# ============================================================================
+experiment:
+  seed: 42                          # Random seed for reproducibility | Change for different random sequences
+  gradient_clip: 0.0                # Gradient clipping value | 0.0=disabled, >0=clip gradients | Range: 0.0-10.0
+  early_stopping_patience: 50      # Stop training if no improvement for N epochs | Higher=more patience | Range: 10-100
+
+# ============================================================================
+# PATHS & DIRECTORIES
+# ============================================================================
+paths:
+  output_dir: './saved_models/'           # Directory to save trained models | Ensure directory exists
+  data_dir: 'sr3_batch_output/'         # Directory containing training data | Must contain batch_*.h5 files
+  model_prefix: 'e2co'                   # Prefix for saved model files | Used in filename generation
+  file_extension: '.h5'                  # File extension for model weights | .h5 for HDF5 format
+  
+  # Auto-generated filename pattern (do not modify)
+  # Format: {prefix}_{component}_3D_native_nt{num_train}_l{latent_dim}_lr{lr}_ep{epoch}_steps{nsteps}_channels{n_channels}_wells{num_well}.h5
+
+# ============================================================================
+# VALIDATION & TESTING
+# ============================================================================
+validation:
+  eval_frequency: 1                 # Evaluate on validation set every N epochs | Higher=less frequent validation | Range: 1-10
+  test_batch_size: 16               # Batch size for evaluation | Can be larger than training batch_size | Range: 16-64
+  save_predictions: false           # Save model predictions for analysis | True=save outputs, uses disk space
+
