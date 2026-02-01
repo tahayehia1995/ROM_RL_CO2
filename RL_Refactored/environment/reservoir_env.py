@@ -520,8 +520,13 @@ class ReservoirEnvironment(object):
                 self.current_spatial_state = next_spatial_state
                 
                 # Encode next spatial state to latent (for RL state representation)
+                # Encoder returns (z, mean, logvar) tuple - extract z (first element)
                 with torch.no_grad():
-                    self.state = self.rom.model.encoder(next_spatial_state)
+                    encoder_output = self.rom.model.encoder(next_spatial_state)
+                    if isinstance(encoder_output, tuple):
+                        self.state = encoder_output[0]
+                    else:
+                        self.state = encoder_output
                 
                 # Debug logging for first few steps
                 if self.istep <= 3:

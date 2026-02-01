@@ -329,7 +329,12 @@ class BaseOptimizer(ABC):
                 next_spatial, yobs_normalized = self.rom.predict(inputs)
                 
                 # Encode next spatial to latent for state tracking
-                next_latent = self.rom.model.encoder(next_spatial)
+                # Encoder returns (z, mean, logvar) tuple - extract z (first element)
+                encoder_output = self.rom.model.encoder(next_spatial)
+                if isinstance(encoder_output, tuple):
+                    next_latent = encoder_output[0]
+                else:
+                    next_latent = encoder_output
             
             # Denormalize observations to PHYSICAL units
             yobs_physical = self._denormalize_observations(yobs_normalized)

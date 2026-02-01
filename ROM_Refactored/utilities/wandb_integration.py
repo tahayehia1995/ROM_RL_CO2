@@ -106,6 +106,14 @@ class WandBLogger:
             if well_loss and well_loss > 0:
                 metrics['train/well_loss'] = well_loss
             
+            # Add VAE KL loss if available
+            try:
+                kl_loss = self._get_value(my_rom.get_train_kl_loss())
+                if kl_loss and kl_loss > 0:
+                    metrics['train/kl_loss'] = kl_loss
+            except Exception:
+                pass  # KL loss not available (VAE not enabled)
+            
             # Add dynamic loss weights if available
             try:
                 dynamic_weights = my_rom.loss_object.getDynamicWeights()
@@ -195,6 +203,14 @@ class WandBLogger:
             if well_loss and well_loss > 0:
                 metrics['eval/well_loss'] = well_loss
             
+            # Add VAE KL loss if available
+            try:
+                kl_loss = self._get_value(my_rom.get_test_kl_loss())
+                if kl_loss and kl_loss > 0:
+                    metrics['eval/kl_loss'] = kl_loss
+            except Exception:
+                pass  # KL loss not available (VAE not enabled)
+            
             # Add current dynamic weights (evaluation uses same weights as training)
             try:
                 dynamic_weights = my_rom.loss_object.getDynamicWeights()
@@ -222,9 +238,18 @@ class WandBLogger:
                 recon_str = f"{current_reconstruction_loss:.6f}" if current_reconstruction_loss is not None else "N/A"
                 trans_str = f"{current_transition_loss:.6f}" if current_transition_loss is not None else "N/A"
                 total_str = f"{current_total_loss:.6f}" if current_total_loss is not None else "N/A"
+                
+                # Get KL loss if available
+                try:
+                    kl_loss = self._get_value(my_rom.get_test_kl_loss())
+                    kl_str = f"{kl_loss:.6f}" if kl_loss is not None and kl_loss > 0 else "N/A"
+                except Exception:
+                    kl_str = "N/A"
+                
                 print(f"🏆 New best model! Observation Loss: {self.best_observation_loss:.6f} | "
                       f"Reconstruction Loss: {recon_str} | "
                       f"Transition Loss: {trans_str} | "
+                      f"KL Loss: {kl_str} | "
                       f"Total: {total_str}")
             
         except Exception as e:

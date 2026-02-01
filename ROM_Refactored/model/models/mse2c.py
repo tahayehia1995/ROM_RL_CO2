@@ -77,8 +77,13 @@ class MSE2C(nn.Module):
         x0 = X[0]
         
         # Encode and decode initial state
-        z0 = self.encoder(x0)
+        # VAE mode: encoder returns (z, mu, logvar); AE mode: returns (z, None, None)
+        z0, mu0, logvar0 = self.encoder(x0)
         x0_rec = self.decoder(z0)
+        
+        # Collect VAE parameters for KL loss computation
+        mu_list = [mu0] if mu0 is not None else None
+        logvar_list = [logvar0] if logvar0 is not None else None
         
         X_next_pred = []
         Z_next = []
@@ -93,13 +98,19 @@ class MSE2C(nn.Module):
             
             # Encode predicted spatial states to get latent representations
             for x_next_pred in X_next_pred:
-                z_next_pred = self.encoder(x_next_pred)
+                z_next_pred, mu_pred, logvar_pred = self.encoder(x_next_pred)
                 Z_next_pred.append(z_next_pred)
+                if mu_list is not None:
+                    mu_list.append(mu_pred)
+                    logvar_list.append(logvar_pred)
             
             # Encode true states for consistency
             for i_step in range(len(X_next)):
-                z_next = self.encoder(X[i_step + 1])
+                z_next, mu_next, logvar_next = self.encoder(X[i_step + 1])
                 Z_next.append(z_next)
+                if mu_list is not None:
+                    mu_list.append(mu_next)
+                    logvar_list.append(logvar_next)
                 
         elif self.transition_mode == 'hybrid':
             # Hybrid model can use both approaches
@@ -113,8 +124,11 @@ class MSE2C(nn.Module):
                 
                 # Encode predicted spatial states
                 for x_next_pred in X_next_pred:
-                    z_next_pred = self.encoder(x_next_pred)
+                    z_next_pred, mu_pred, logvar_pred = self.encoder(x_next_pred)
                     Z_next_pred.append(z_next_pred)
+                    if mu_list is not None:
+                        mu_list.append(mu_pred)
+                        logvar_list.append(logvar_pred)
             else:
                 # Use traditional latent approach
                 Z_next_pred, Y_next_pred = self.transition.forward_nsteps(z0, dt, U)
@@ -126,8 +140,11 @@ class MSE2C(nn.Module):
             
             # Encode true states
             for i_step in range(len(X_next)):
-                z_next = self.encoder(X[i_step + 1])
+                z_next, mu_next, logvar_next = self.encoder(X[i_step + 1])
                 Z_next.append(z_next)
+                if mu_list is not None:
+                    mu_list.append(mu_next)
+                    logvar_list.append(logvar_next)
                 
         else:
             # Traditional latent-based approach
@@ -138,15 +155,21 @@ class MSE2C(nn.Module):
 
                 # Decode predicted latent state
                 x_next_pred = self.decoder(z_next_pred)
-                z_next = self.encoder(X[i_step + 1])
+                z_next, mu_next, logvar_next = self.encoder(X[i_step + 1])
                 
                 X_next_pred.append(x_next_pred)
                 Z_next.append(z_next)
+                if mu_list is not None:
+                    mu_list.append(mu_next)
+                    logvar_list.append(logvar_next)
             
-        return X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec
+        return X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec, mu_list, logvar_list
     
     def predict(self, inputs):
-        
+        """
+        Single-step prediction for inference.
+        In inference mode, we use the mean (deterministic) for VAE.
+        """
         # xt, ut, yt, dt, perm = inputs
         xt, ut, yt, dt = inputs
 
@@ -165,13 +188,15 @@ class MSE2C(nn.Module):
                 return xt_next_pred, yt_next
             else:
                 # Use traditional latent approach
-                zt = self.encoder(xt)
+                # VAE: unpack tuple, use z (which is mean in inference if not training)
+                zt, _, _ = self.encoder(xt)
                 zt_next, yt_next = self.transition.linear_model(zt, dt, ut)
                 xt_next_pred = self.decoder(zt_next)
                 return xt_next_pred, yt_next
         else:
             # Traditional latent-based approach
-            zt = self.encoder(xt)
+            # VAE: unpack tuple, use z (sampled during training, mean during eval)
+            zt, _, _ = self.encoder(xt)
             zt_next, yt_next = self.transition(zt, dt, ut)
             xt_next_pred = self.decoder(zt_next)
                 
@@ -187,10 +212,33 @@ class MSE2C(nn.Module):
         # Determine the appropriate device
         device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
         
+        # Load encoder state dict first to check for VAE
+        encoder_state = torch.load(encoder_file, map_location=device, weights_only=False)
+        
+        # Detect if weights contain VAE layers (fc_logvar)
+        weights_have_vae = 'fc_logvar.weight' in encoder_state
+        model_has_vae = hasattr(self.encoder, 'fc_logvar') and self.encoder.fc_logvar is not None
+        
+        if weights_have_vae and not model_has_vae:
+            # Weights have VAE but model doesn't - add fc_logvar layer dynamically
+            print("   🔧 Detected VAE weights - adding fc_logvar layer to encoder...")
+            import torch.nn as nn
+            from model.utils.initialization import weights_init
+            
+            # Get dimensions from the fc_logvar weights in the checkpoint
+            latent_dim = encoder_state['fc_logvar.weight'].shape[0]
+            flattened_size = encoder_state['fc_logvar.weight'].shape[1]
+            
+            # Add the fc_logvar layer
+            self.encoder.fc_logvar = nn.Linear(flattened_size, latent_dim)
+            self.encoder.fc_logvar.apply(weights_init)
+            self.encoder.enable_vae = True
+            self.encoder.to(device)
+        
         # Load weights with appropriate device mapping
-        self.encoder.load_state_dict(torch.load(encoder_file, map_location=device))
-        self.decoder.load_state_dict(torch.load(decoder_file, map_location=device))
-        self.transition.load_state_dict(torch.load(transition_file, map_location=device))
+        self.encoder.load_state_dict(encoder_state)
+        self.decoder.load_state_dict(torch.load(decoder_file, map_location=device, weights_only=False))
+        self.transition.load_state_dict(torch.load(transition_file, map_location=device, weights_only=False))
         
     def save_weights_to_file(self, encoder_file, decoder_file, transition_file):
         torch.save(self.encoder.state_dict(), encoder_file)

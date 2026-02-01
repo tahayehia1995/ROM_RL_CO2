@@ -59,6 +59,9 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         """
         Initialize LS-SQP optimizer with StoSAG.
         
+        Uses RL-like random sampling: picks 1 random case from the pool at each iteration,
+        exactly like RL picks 1 random case at each episode reset.
+        
         Args:
             rom_model: ROMWithE2C model instance
             config: Configuration object with economic parameters
@@ -112,12 +115,86 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             'objectives': [],
             'gradient_norms': [],
             'step_sizes': [],
-            'controls': []
+            'controls': [],
+            'sampled_indices': []  # Track which cases were sampled (RL-like)
         }
         
         # Z0 ensemble (set during optimize)
         self.z0_ensemble = None
         self.num_steps = None
+        
+        # Sampling statistics (RL-like: track how many times each case was sampled)
+        self.total_samples_count = {}  # Track how many times each case was sampled
+    
+    # =========================================================================
+    # SAMPLING METHODS (RL-like: pick 1 random case per iteration)
+    # =========================================================================
+    
+    def _get_random_realization(self) -> Tuple[torch.Tensor, int]:
+        """
+        Get ONE random realization for current iteration (RL-like behavior).
+        
+        This matches exactly how RL works: at each episode reset, RL picks
+        ONE random case from all available z0_options.
+        
+        Returns:
+            selected_z0: Tensor of selected initial state (1, latent_dim)
+            selected_index: The index that was selected
+        """
+        num_available = self.z0_ensemble.shape[0]
+        
+        # Random sampling: Select ONE random case index (exactly like RL)
+        random_idx = np.random.randint(0, num_available)
+        
+        selected_z0 = self.z0_ensemble[random_idx:random_idx+1]  # Keep batch dimension
+        
+        # Track sampling statistics
+        self.total_samples_count[random_idx] = self.total_samples_count.get(random_idx, 0) + 1
+        
+        return selected_z0, random_idx
+    
+    def get_sampling_statistics(self) -> Dict:
+        """
+        Get statistics about sampling during optimization.
+        
+        Returns:
+            Dictionary with sampling statistics
+        """
+        if not self.total_samples_count:
+            return {'message': 'No sampling data available yet'}
+        
+        counts = list(self.total_samples_count.values())
+        indices_sampled = list(self.total_samples_count.keys())
+        
+        stats = {
+            'sampling_mode': 'RL-like (1 random case per iteration)',
+            'total_cases_available': self.z0_ensemble.shape[0] if self.z0_ensemble is not None else 0,
+            'unique_cases_sampled': len(indices_sampled),
+            'total_samples_drawn': sum(counts),
+            'min_samples_per_case': min(counts) if counts else 0,
+            'max_samples_per_case': max(counts) if counts else 0,
+            'mean_samples_per_case': np.mean(counts) if counts else 0,
+            'coverage_percentage': 100 * len(indices_sampled) / self.z0_ensemble.shape[0] if self.z0_ensemble is not None else 0
+        }
+        
+        return stats
+    
+    def print_sampling_statistics(self):
+        """Print formatted sampling statistics."""
+        stats = self.get_sampling_statistics()
+        
+        print(f"\n{'='*60}")
+        print(f"🎲 Sampling Statistics (RL-like)")
+        print(f"{'='*60}")
+        print(f"Mode: {stats.get('sampling_mode', 'N/A')}")
+        print(f"Total cases available: {stats.get('total_cases_available', 'N/A')}")
+        print(f"Unique cases sampled: {stats.get('unique_cases_sampled', 'N/A')}")
+        print(f"Total samples drawn: {stats.get('total_samples_drawn', 'N/A')}")
+        print(f"Coverage: {stats.get('coverage_percentage', 0):.1f}%")
+        print(f"Samples per case: min={stats.get('min_samples_per_case', 0)}, "
+              f"max={stats.get('max_samples_per_case', 0)}, "
+              f"mean={stats.get('mean_samples_per_case', 0):.2f}")
+        print(f"{'='*60}\n")
         
     def optimize(
         self,
@@ -136,7 +213,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         """
         start_time = time.time()
         self.reset_counters()
-        self.history = {'objectives': [], 'gradient_norms': [], 'step_sizes': [], 'controls': []}
+        self.history = {'objectives': [], 'gradient_norms': [], 'step_sizes': [], 'controls': [], 'sampled_indices': []}
+        self.total_samples_count = {}  # Reset sampling statistics
         
         # Setup
         num_steps = num_steps or 30
@@ -150,12 +228,14 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         actual_realizations = z0_options.shape[0]
         
         print(f"\n{'='*60}")
-        print(f"LS-SQP Optimization")
+        print(f"LS-SQP Optimization (RL-like Sampling)")
         print(f"{'='*60}")
         if actual_realizations == 1:
             print(f"Mode: Single Case Optimization")
         else:
-            print(f"Mode: Robust Optimization ({actual_realizations} realizations)")
+            print(f"Mode: RL-like Stochastic Optimization")
+            print(f"   Pool size: {actual_realizations} cases")
+            print(f"   Sampling: 1 random case per iteration (like RL episode reset)")
         print(f"Timesteps: {num_steps}")
         print(f"Control variables: {self.num_controls * num_steps}")
         print(f"Max iterations: {self.max_iterations}")
@@ -258,6 +338,9 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         print(f"{'='*60}")
         print(optimization_result.summary())
         
+        # Print RL-like sampling statistics
+        self.print_sampling_statistics()
+        
         return optimization_result
     
     def _run_slsqp_optimization(
@@ -268,6 +351,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
     ):
         """
         Run scipy SLSQP with StoSAG gradients.
+        
+        Uses RL-like sampling: picks 1 random case per iteration.
         
         Args:
             x0: Initial control vector
@@ -280,9 +365,14 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         # Objective wrapper for scipy (minimization, so we negate for maximization)
         def objective(x):
             controls = x.reshape(num_steps, self.num_controls)
-            obj, _ = self.evaluate_robust_objective(controls, self.z0_ensemble)
+            
+            # RL-like: pick 1 random case for this evaluation
+            current_z0, sampled_idx = self._get_random_realization()
+            obj, _ = self.evaluate_objective(controls, current_z0)
+            
             self.history['objectives'].append(obj)
             self.history['controls'].append(x.copy())
+            self.history['sampled_indices'].append(sampled_idx)
             return -obj  # Negate for minimization
         
         # Gradient wrapper
@@ -297,9 +387,18 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         def callback(xk):
             iteration_count[0] += 1
             if iteration_count[0] % 10 == 0 or iteration_count[0] <= 5:
-                obj = -objective(xk)  # Negate back to get actual objective
-                print(f"Iteration {iteration_count[0]:4d}: Objective = {obj:.6f}, "
+                # For progress, evaluate using a random case (RL-like)
+                controls = xk.reshape(num_steps, self.num_controls)
+                current_z0, sampled_idx = self._get_random_realization()
+                obj, _ = self.evaluate_objective(controls, current_z0)
+                
+                print(f"Iteration {iteration_count[0]:4d}: Objective = {obj:.6f} (Case {sampled_idx}), "
                       f"Grad Norm = {self.history['gradient_norms'][-1]:.6e}")
+                
+                # Show sampling coverage for first few iterations
+                if iteration_count[0] <= 5:
+                    stats = self.get_sampling_statistics()
+                    print(f"   🎲 Cases sampled so far: {stats.get('unique_cases_sampled', 0)}/{stats.get('total_cases_available', 0)}")
         
         # Run SLSQP
         print("Starting SLSQP optimization...")
@@ -365,6 +464,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         MUCH FASTER than finite differences - only 2 function evaluations
         per gradient sample regardless of dimension!
         
+        Uses RL-like sampling: picks 1 random case per gradient computation.
+        
         Reference: Spall (1992) - Multivariate Stochastic Approximation
         
         Args:
@@ -379,6 +480,12 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         
         # Perturbation magnitude (can decay with iterations)
         c_k = self.perturbation_size
+        
+        # RL-like: pick 1 random case for this gradient computation
+        current_z0, sampled_idx = self._get_random_realization()
+        
+        # Track sampled index
+        self.history['sampled_indices'].append(sampled_idx)
         
         all_gradients = []
         
@@ -395,14 +502,14 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             x_plus = project_to_bounds(x_plus, bounds_list)
             x_minus = project_to_bounds(x_minus, bounds_list)
             
-            # Evaluate at both points (average over realizations)
-            f_plus, _ = self.evaluate_robust_objective(
+            # Evaluate at both points using the SAME random case (RL-like)
+            f_plus, _ = self.evaluate_objective(
                 x_plus.reshape(num_steps, self.num_controls),
-                self.z0_ensemble
+                current_z0
             )
-            f_minus, _ = self.evaluate_robust_objective(
+            f_minus, _ = self.evaluate_objective(
                 x_minus.reshape(num_steps, self.num_controls),
-                self.z0_ensemble
+                current_z0
             )
             
             # SPSA gradient estimate
@@ -417,6 +524,7 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         if self.gradient_eval_count <= 2:
             print(f"\n   SPSA Gradient (only {2 * self.spsa_num_samples} ROM evals vs {n_vars} for FD!):")
             print(f"   Samples: {self.spsa_num_samples}, Perturbation: {c_k}")
+            print(f"   🎲 RL-like: using Case {sampled_idx}")
             print(f"   Gradient norm: {np.linalg.norm(gradient):.6f}")
         
         return gradient
@@ -430,6 +538,7 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         Adjoint (automatic differentiation) gradient using PyTorch.
         
         FASTEST method - single forward + backward pass!
+        Uses RL-like sampling: picks 1 random case per gradient computation.
         
         Args:
             x: Current control vector
@@ -438,6 +547,12 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         Returns:
             Gradient via autodiff
         """
+        # RL-like: pick 1 random case for this gradient computation
+        current_z0, sampled_idx = self._get_random_realization()
+        
+        # Track sampled index
+        self.history['sampled_indices'].append(sampled_idx)
+        
         # Convert to tensor with gradient tracking
         x_tensor = torch.tensor(
             x.reshape(num_steps, self.num_controls), 
@@ -446,20 +561,11 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             requires_grad=True
         )
         
-        # Average over realizations
-        total_obj = 0.0
-        
-        for r in range(self.num_realizations):
-            z0_r = self.z0_ensemble[r:r+1]
-            
-            # Forward pass with gradient tracking
-            obj = self._differentiable_objective(x_tensor, z0_r)
-            total_obj = total_obj + obj
-        
-        avg_obj = total_obj / self.num_realizations
+        # Forward pass with gradient tracking using the random case
+        obj = self._differentiable_objective(x_tensor, current_z0)
         
         # Backward pass - compute gradients
-        avg_obj.backward()
+        obj.backward()
         
         # Extract gradient
         gradient = x_tensor.grad.cpu().numpy().flatten()
@@ -467,6 +573,7 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         # Debug output
         if self.gradient_eval_count <= 2:
             print(f"\n   Adjoint Gradient (single backward pass!):")
+            print(f"   🎲 RL-like: using Case {sampled_idx}")
             print(f"   Gradient norm: {np.linalg.norm(gradient):.6f}")
         
         return gradient
@@ -569,18 +676,16 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         """
         Stochastic Simplex Approximate Gradient (StoSAG).
         
-        For each realization, uses a simplex-based gradient approximation.
-        The gradients are then averaged for robustness.
+        Uses RL-like sampling: picks 1 random case per gradient computation.
         
         Args:
             x: Current control vector
             num_steps: Number of timesteps
             
         Returns:
-            Robust gradient estimate
+            Gradient estimate using single random case
         """
         n_vars = len(x)
-        all_gradients = []
         
         # Compute perturbation scale based on variable ranges
         bounds_list = self.get_bounds(num_steps)
@@ -588,76 +693,74 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             self.perturbation_size * (b[1] - b[0]) for b in bounds_list
         ])
         
-        # Debug: Print perturbation info on first call
+        # RL-like: pick 1 random case for this gradient computation
+        current_z0, sampled_idx = self._get_random_realization()
+        
+        # Track sampled index
+        self.history['sampled_indices'].append(sampled_idx)
+        
+        # Debug: Print perturbation and sampling info on first call
         if self.gradient_eval_count <= 1:
             print(f"\n   DEBUG - Gradient Computation (Normalized Space):")
             print(f"   Perturbation size: {self.perturbation_size}")
             print(f"   All perturbations are {self.perturbation_size} in [0,1] space")
+            print(f"   🎲 RL-like: using Case {sampled_idx}")
         
-        # For each realization
-        for r in range(self.num_realizations):
-            z0_r = self.z0_ensemble[r:r+1]
-            
-            # Evaluate base point
-            controls_base = x.reshape(num_steps, self.num_controls)
-            f0, trajectory = self.evaluate_objective(controls_base, z0_r, return_trajectory=True)
-            
-            # Debug: Print base objective on first call
-            if self.gradient_eval_count <= 1 and r == 0:
-                print(f"   Base objective: {f0:.6f}")
-                print(f"   Base controls normalized (step 0): {controls_base[0, :]}")
-                if trajectory and 'controls_physical' in trajectory:
-                    phys = trajectory['controls_physical'][0]
-                    print(f"   Base controls physical (step 0): BHP={phys[:self.num_prod]}, Gas={phys[self.num_prod:]}")
-                if trajectory and 'observations' in trajectory:
-                    obs0 = trajectory['observations'][0]
-                    print(f"   Base observations (step 0): {obs0[0, :3]} (BHP), {obs0[0, 3:6]} (Gas), {obs0[0, 6:]} (Water)")
-            
-            # Simplex gradient approximation
-            grad_r = np.zeros(n_vars)
-            non_zero_grads = 0
-            
-            for i in range(n_vars):
-                x_plus = x.copy()
-                x_plus[i] += perturbation_scales[i]
-                
-                # Project to bounds
-                x_plus = project_to_bounds(x_plus, bounds_list)
-                
-                controls_plus = x_plus.reshape(num_steps, self.num_controls)
-                f_plus, _ = self.evaluate_objective(controls_plus, z0_r)
-                
-                # Forward difference approximation
-                delta_x = x_plus[i] - x[i]
-                if abs(delta_x) > 1e-10:
-                    grad_r[i] = (f_plus - f0) / delta_x
-                    if abs(f_plus - f0) > 1e-10:
-                        non_zero_grads += 1
-                else:
-                    grad_r[i] = 0.0
-                
-                # Debug: First few gradient computations
-                if self.gradient_eval_count <= 1 and i < 6:
-                    print(f"   Var {i}: f0={f0:.6f}, f+={f_plus:.6f}, delta_f={f_plus-f0:.8f}, delta_x={delta_x:.4f}, grad={grad_r[i]:.8f}")
-            
-            if self.gradient_eval_count <= 1:
-                print(f"   Non-zero gradients: {non_zero_grads}/{n_vars}")
-            
-            all_gradients.append(grad_r)
+        # Evaluate base point
+        controls_base = x.reshape(num_steps, self.num_controls)
+        f0, trajectory = self.evaluate_objective(controls_base, current_z0, return_trajectory=True)
         
-        # Average gradients across realizations
-        robust_gradient = np.mean(all_gradients, axis=0)
+        # Debug: Print base objective on first call
+        if self.gradient_eval_count <= 1:
+            print(f"   Base objective: {f0:.6f}")
+            print(f"   Base controls normalized (step 0): {controls_base[0, :]}")
+            if trajectory and 'controls_physical' in trajectory:
+                phys = trajectory['controls_physical'][0]
+                print(f"   Base controls physical (step 0): BHP={phys[:self.num_prod]}, Gas={phys[self.num_prod:]}")
+            if trajectory and 'observations' in trajectory:
+                obs0 = trajectory['observations'][0]
+                print(f"   Base observations (step 0): {obs0[0, :3]} (BHP), {obs0[0, 3:6]} (Gas), {obs0[0, 6:]} (Water)")
+        
+        # Simplex gradient approximation
+        gradient = np.zeros(n_vars)
+        non_zero_grads = 0
+        
+        for i in range(n_vars):
+            x_plus = x.copy()
+            x_plus[i] += perturbation_scales[i]
+            
+            # Project to bounds
+            x_plus = project_to_bounds(x_plus, bounds_list)
+            
+            controls_plus = x_plus.reshape(num_steps, self.num_controls)
+            f_plus, _ = self.evaluate_objective(controls_plus, current_z0)
+            
+            # Forward difference approximation
+            delta_x = x_plus[i] - x[i]
+            if abs(delta_x) > 1e-10:
+                gradient[i] = (f_plus - f0) / delta_x
+                if abs(f_plus - f0) > 1e-10:
+                    non_zero_grads += 1
+            else:
+                gradient[i] = 0.0
+            
+            # Debug: First few gradient computations
+            if self.gradient_eval_count <= 1 and i < 6:
+                print(f"   Var {i}: f0={f0:.6f}, f+={f_plus:.6f}, delta_f={f_plus-f0:.8f}, delta_x={delta_x:.4f}, grad={gradient[i]:.8f}")
+        
+        if self.gradient_eval_count <= 1:
+            print(f"   Non-zero gradients: {non_zero_grads}/{n_vars}")
         
         # Debug: print gradient statistics for first few calls
         if self.gradient_eval_count <= 3:
-            grad_reshaped = robust_gradient.reshape(num_steps, self.num_controls)
+            grad_reshaped = gradient.reshape(num_steps, self.num_controls)
             bhp_grad = grad_reshaped[:, :self.num_prod]
             gas_grad = grad_reshaped[:, self.num_prod:]
             print(f"   Gradient stats (eval {self.gradient_eval_count}):")
             print(f"      BHP grad: mean={np.mean(np.abs(bhp_grad)):.6e}, max={np.max(np.abs(bhp_grad)):.6e}")
             print(f"      Gas grad: mean={np.mean(np.abs(gas_grad)):.6e}, max={np.max(np.abs(gas_grad)):.6e}")
         
-        return robust_gradient
+        return gradient
     
     def _central_difference_gradient(
         self,
@@ -666,6 +769,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
     ) -> np.ndarray:
         """
         Central difference gradient (more accurate but 2x function evals).
+        
+        Uses RL-like sampling: picks 1 random case per gradient computation.
         """
         n_vars = len(x)
         bounds_list = self.get_bounds(num_steps)
@@ -673,35 +778,35 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             self.perturbation_size * (b[1] - b[0]) for b in bounds_list
         ])
         
-        all_gradients = []
+        # RL-like: pick 1 random case for this gradient computation
+        current_z0, sampled_idx = self._get_random_realization()
         
-        for r in range(self.num_realizations):
-            z0_r = self.z0_ensemble[r:r+1]
-            grad_r = np.zeros(n_vars)
-            
-            for i in range(n_vars):
-                x_plus = x.copy()
-                x_minus = x.copy()
-                x_plus[i] += perturbation_scales[i]
-                x_minus[i] -= perturbation_scales[i]
-                
-                x_plus = project_to_bounds(x_plus, bounds_list)
-                x_minus = project_to_bounds(x_minus, bounds_list)
-                
-                f_plus, _ = self.evaluate_objective(
-                    x_plus.reshape(num_steps, self.num_controls), z0_r
-                )
-                f_minus, _ = self.evaluate_objective(
-                    x_minus.reshape(num_steps, self.num_controls), z0_r
-                )
-                
-                h = x_plus[i] - x_minus[i]
-                if abs(h) > 1e-10:
-                    grad_r[i] = (f_plus - f_minus) / h
-            
-            all_gradients.append(grad_r)
+        # Track sampled index
+        self.history['sampled_indices'].append(sampled_idx)
         
-        return np.mean(all_gradients, axis=0)
+        gradient = np.zeros(n_vars)
+        
+        for i in range(n_vars):
+            x_plus = x.copy()
+            x_minus = x.copy()
+            x_plus[i] += perturbation_scales[i]
+            x_minus[i] -= perturbation_scales[i]
+            
+            x_plus = project_to_bounds(x_plus, bounds_list)
+            x_minus = project_to_bounds(x_minus, bounds_list)
+            
+            f_plus, _ = self.evaluate_objective(
+                x_plus.reshape(num_steps, self.num_controls), current_z0
+            )
+            f_minus, _ = self.evaluate_objective(
+                x_minus.reshape(num_steps, self.num_controls), current_z0
+            )
+            
+            h = x_plus[i] - x_minus[i]
+            if abs(h) > 1e-10:
+                gradient[i] = (f_plus - f_minus) / h
+        
+        return gradient
     
     def _forward_difference_gradient(
         self,
@@ -710,6 +815,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
     ) -> np.ndarray:
         """
         Simple forward difference gradient.
+        
+        Uses RL-like sampling: picks 1 random case per gradient computation.
         """
         n_vars = len(x)
         bounds_list = self.get_bounds(num_steps)
@@ -717,10 +824,16 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             self.perturbation_size * (b[1] - b[0]) for b in bounds_list
         ])
         
-        # Evaluate base point (average over all realizations)
-        f0, _ = self.evaluate_robust_objective(
+        # RL-like: pick 1 random case for this gradient computation
+        current_z0, sampled_idx = self._get_random_realization()
+        
+        # Track sampled index
+        self.history['sampled_indices'].append(sampled_idx)
+        
+        # Evaluate base point using the random case
+        f0, _ = self.evaluate_objective(
             x.reshape(self.num_steps, self.num_controls), 
-            self.z0_ensemble
+            current_z0
         )
         
         gradient = np.zeros(n_vars)
@@ -730,9 +843,9 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
             x_plus[i] += perturbation_scales[i]
             x_plus = project_to_bounds(x_plus, bounds_list)
             
-            f_plus, _ = self.evaluate_robust_objective(
+            f_plus, _ = self.evaluate_objective(
                 x_plus.reshape(self.num_steps, self.num_controls),
-                self.z0_ensemble
+                current_z0
             )
             
             h = x_plus[i] - x[i]

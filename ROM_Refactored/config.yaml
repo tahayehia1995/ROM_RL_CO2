@@ -37,11 +37,12 @@ data_preprocessing:
     verbose: true
     show_progress: true
 model:
-  latent_dim: 128
+  latent_dim: 64
   u_dim: 6
   n_channels: 2
   method: E2C
   sigma: 0.0
+  enable_vae: false
 data:
   input_shape:
   - 2
@@ -207,7 +208,6 @@ transition:
   encoder_hidden_dims:
   - 200
   - 200
-  - 200
   fno:
     width: 64
     modes_x: 8
@@ -236,7 +236,7 @@ transition:
     predict_mode: fno_only
 training:
   epoch: 400
-  batch_size: 8
+  batch_size: 64
   learning_rate: 0.0001
   nsteps: 2
   num_tsteps: 30
@@ -298,6 +298,20 @@ loss:
   enable_bhp_loss: false
   enable_non_negative_loss: false
   lambda_non_negative_loss: 1.0
+  enable_kl_loss: false
+  lambda_kl_loss: 0.001
+  enable_kl_annealing: false
+  kl_annealing_schedule:
+  - epoch: 0
+    lambda: 0.0
+  - epoch: 50
+    lambda: 1.0e-06
+  - epoch: 100
+    lambda: 1.0e-05
+  - epoch: 150
+    lambda: 0.0001
+  - epoch: 200
+    lambda: 0.001
   lambda_reconstruction_loss: 1.0
   enable_per_element_normalization: true
   reconstruction_variance: 1.0

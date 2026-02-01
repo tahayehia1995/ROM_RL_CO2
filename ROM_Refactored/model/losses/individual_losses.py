@@ -217,3 +217,35 @@ def get_well_bhp_loss(state, state_pred, prod_well_loc, pressure_channel=2):
     bhp_loss = torch.mean(torch.abs(p_true - p_pred))
     return bhp_loss
 
+
+def get_kl_divergence_loss(mu, logvar, reduction='mean'):
+    """
+    KL divergence loss for Variational Autoencoder.
+    Computes KL(q(z|x) || p(z)) where q(z|x) = N(mu, sigma^2) and p(z) = N(0, I).
+    
+    KL divergence formula:
+    KL(N(mu, sigma^2) || N(0, 1)) = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+    
+    Args:
+        mu: Mean of the latent distribution (batch_size, latent_dim)
+        logvar: Log variance of the latent distribution (batch_size, latent_dim)
+        reduction: 'sum', 'mean', or 'none'
+                  - 'sum': Sum over all dimensions and batch
+                  - 'mean': Mean over batch (sum over latent dims, mean over batch)
+                  - 'none': Return per-sample KL (batch_size,)
+    
+    Returns:
+        KL divergence loss
+    """
+    # KL divergence per sample: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
+    
+    if reduction == 'sum':
+        return kl_per_sample.sum()
+    elif reduction == 'mean':
+        return kl_per_sample.mean()
+    elif reduction == 'none':
+        return kl_per_sample
+    else:
+        raise ValueError(f"Unknown reduction: {reduction}. Use 'sum', 'mean', or 'none'.")
+

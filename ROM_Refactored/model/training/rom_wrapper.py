@@ -49,6 +49,7 @@ class ROMWithE2C(nn.Module):
         self.train_transition_loss = torch.tensor(0.0)
         self.train_observation_loss = torch.tensor(0.0)
         self.train_non_negative_loss = torch.tensor(0.0)
+        self.train_kl_loss = torch.tensor(0.0)  # VAE KL divergence loss
         self.test_loss = torch.tensor(0.0)
         self.test_reconstruction_loss = torch.tensor(0.0)
         self.test_flux_loss = torch.tensor(0.0)
@@ -56,6 +57,7 @@ class ROMWithE2C(nn.Module):
         self.test_transition_loss = torch.tensor(0.0)
         self.test_observation_loss = torch.tensor(0.0)
         self.test_non_negative_loss = torch.tensor(0.0)
+        self.test_kl_loss = torch.tensor(0.0)  # VAE KL divergence loss
     
     def _setup_schedulers(self, config):
         """Setup learning rate schedulers based on configuration."""
@@ -190,8 +192,11 @@ class ROMWithE2C(nn.Module):
             
             predictions = self.model(inputs)
             # Parse predictions - consistent with 3D CNN implementation
-            # Original: X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec, perm = predictions
-            X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec = predictions
+            # Handle both VAE mode (11 outputs) and standard mode (9 outputs)
+            if len(predictions) == 11:
+                X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec, mu_list, logvar_list = predictions
+            else:
+                X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec = predictions
             
             # Calculate loss using updated prediction format
             # Original: y_pred = (xt1_pred, zt1_pred, zt1, zt, xt_rec, xt, perm, prod_loc)
@@ -205,6 +210,7 @@ class ROMWithE2C(nn.Module):
             self.test_transition_loss = self.loss_object.getTransitionLoss()
             self.test_observation_loss = self.loss_object.getObservationLoss()
             self.test_non_negative_loss = self.loss_object.getNonNegativeLoss()
+            self.test_kl_loss = self.loss_object.getKLLoss()  # VAE KL divergence loss
 
     def update(self, inputs):
         """
@@ -223,7 +229,12 @@ class ROMWithE2C(nn.Module):
         # ===== GENERATOR UPDATE =====
         self.optimizer.zero_grad()
         predictions = self.model(inputs)
-        X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec = predictions
+        
+        # Handle both VAE mode (11 outputs) and standard mode (9 outputs)
+        if len(predictions) == 11:
+            X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec, mu_list, logvar_list = predictions
+        else:
+            X_next_pred, X_next, Z_next_pred, Z_next, Y_next_pred, Y, z0, x0, x0_rec = predictions
         
         # Get discriminator prediction for adversarial loss if enabled
         discriminator_pred = None
@@ -250,6 +261,7 @@ class ROMWithE2C(nn.Module):
         self.train_transition_loss = self.loss_object.getTransitionLoss()
         self.train_observation_loss = self.loss_object.getObservationLoss()
         self.train_non_negative_loss = self.loss_object.getNonNegativeLoss()
+        self.train_kl_loss = self.loss_object.getKLLoss()  # VAE KL divergence loss
         
         # Step schedulers on batch if needed (for CyclicLR, OneCycleLR)
         self._step_scheduler_on_batch()
@@ -506,6 +518,40 @@ class ROMWithE2C(nn.Module):
             return self.test_non_negative_loss.item()
         else:
             return float(self.test_non_negative_loss)
+    
+    def get_train_kl_loss(self):
+        # Handle case where train_kl_loss might be an integer (0) instead of tensor
+        if isinstance(self.train_kl_loss, torch.Tensor):
+            return self.train_kl_loss.item()
+        else:
+            return float(self.train_kl_loss)
+    
+    def get_test_kl_loss(self):
+        # Handle case where test_kl_loss might be an integer (0) instead of tensor
+        if isinstance(self.test_kl_loss, torch.Tensor):
+            return self.test_kl_loss.item()
+        else:
+            return float(self.test_kl_loss)
+    
+    def update_kl_annealing(self, epoch):
+        """
+        Update KL loss weight based on annealing schedule.
+        
+        Args:
+            epoch: Current training epoch
+            
+        Returns:
+            Current KL lambda value, or None if annealing is not enabled
+        """
+        if hasattr(self.loss_object, 'update_kl_lambda_for_epoch'):
+            return self.loss_object.update_kl_lambda_for_epoch(epoch)
+        return None
+    
+    def get_current_kl_lambda(self):
+        """Get current KL loss weight (lambda)."""
+        if hasattr(self.loss_object, 'getKLLambda'):
+            return self.loss_object.getKLLambda()
+        return None
     
     def save_model_weights(self, encoder_file, decoder_file, transition_file):
         """

@@ -336,7 +336,20 @@ class OptimizerConfigDashboard:
         # Z0 Case Index Selection
         state_widgets.append(widgets.HTML("<h4>Initial State (Z0) Selection:</h4>"))
         state_widgets.append(widgets.HTML(
-            "<p><i>Select which case (0-999) to use as initial reservoir state.</i></p>"
+            "<p><i>Select which case(s) to use as initial reservoir state.</i></p>"
+        ))
+        
+        # Checkbox to load all cases (for RL-like sampling)
+        self.load_all_cases_checkbox = widgets.Checkbox(
+            value=False,
+            description='Load ALL 1000 cases (for RL-like random sampling)',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='400px')
+        )
+        state_widgets.append(self.load_all_cases_checkbox)
+        
+        state_widgets.append(widgets.HTML(
+            "<p><i>Or select a single case:</i></p>"
         ))
         
         self.z0_case_index_input = widgets.IntText(
@@ -877,6 +890,25 @@ class OptimizerConfigDashboard:
             if encoder_hidden_dims:
                 rom_config.config['transition']['encoder_hidden_dims'] = encoder_hidden_dims
         
+        # Detect VAE mode from encoder weights
+        encoder_file = self.optimizer_config['selected_rom']['encoder']
+        vae_enabled = self._detect_vae_from_weights(encoder_file)
+        
+        # Ensure model and loss config sections exist
+        if 'model' not in rom_config.config:
+            rom_config.config['model'] = {}
+        if 'loss' not in rom_config.config:
+            rom_config.config['loss'] = {}
+        
+        if vae_enabled:
+            rom_config.config['model']['enable_vae'] = True
+            rom_config.config['loss']['enable_kl_loss'] = True
+            print(f"   📊 VAE mode: enabled (detected from weights)")
+        else:
+            # Explicitly disable VAE if not detected (config might have it enabled from previous model)
+            rom_config.config['model']['enable_vae'] = False
+            rom_config.config['loss']['enable_kl_loss'] = False
+        
         # Initialize and load model
         self.loaded_rom_model = ROMWithE2C(rom_config).to(self.device)
         
@@ -918,6 +950,14 @@ class OptimizerConfigDashboard:
             return hidden_dims if hidden_dims else [200, 200]
         except:
             return [200, 200]
+    
+    def _detect_vae_from_weights(self, encoder_file: str) -> bool:
+        """Detect if encoder weights contain VAE layers (fc_logvar)."""
+        try:
+            state_dict = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return 'fc_logvar.weight' in state_dict
+        except:
+            return False
     
     def _load_normalization_params(self):
         """Load normalization parameters."""
@@ -1004,8 +1044,17 @@ class OptimizerConfigDashboard:
         print(f"   ✅ Loaded normalization params from {latest_file.name}")
     
     def _generate_z0_options(self) -> bool:
-        """Generate initial state (Z0) from selected case index."""
-        # Get selected case index
+        """Generate initial state (Z0) from selected case index or all cases."""
+        # Check if loading all cases
+        load_all = self.load_all_cases_checkbox.value
+        
+        if load_all:
+            return self._generate_all_z0_options()
+        else:
+            return self._generate_single_z0_option()
+    
+    def _generate_single_z0_option(self) -> bool:
+        """Generate initial state (Z0) from a single selected case index."""
         case_index = self.z0_case_index_input.value
         self.optimizer_config['z0_case_index'] = case_index
         
@@ -1054,8 +1103,14 @@ class OptimizerConfigDashboard:
             spatial_state = torch.cat([ch.unsqueeze(1) for ch in channels], dim=1).to(self.device)
             
             # Encode to latent space
+            # Encoder returns (z, mean, logvar) tuple - we need just the z (first element)
             with torch.no_grad():
-                z0 = self.loaded_rom_model.model.encoder(spatial_state)
+                encoder_output = self.loaded_rom_model.model.encoder(spatial_state)
+                # Handle tuple output from encoder (VAE or AE mode)
+                if isinstance(encoder_output, tuple):
+                    z0 = encoder_output[0]  # First element is z (or mean in AE mode)
+                else:
+                    z0 = encoder_output
             
             self.generated_z0_options = z0  # Single Z0 (batch size 1)
             self.optimizer_config['z0_options'] = z0
@@ -1068,6 +1123,90 @@ class OptimizerConfigDashboard:
             
         except Exception as e:
             print(f"   ❌ Error generating Z0: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _generate_all_z0_options(self) -> bool:
+        """Generate initial states (Z0) for ALL available cases (RL-like sampling)."""
+        print(f"🏔️ Loading ALL initial states for RL-like sampling...")
+        
+        try:
+            import h5py
+            
+            # Load state data for ALL cases
+            selected_states = self.optimizer_config['selected_states']
+            all_state_data = {}
+            num_cases = 0
+            
+            for state in selected_states:
+                state_file = os.path.join(self.state_folder, f'batch_spatial_properties_{state}.h5')
+                if os.path.exists(state_file):
+                    with h5py.File(state_file, 'r') as f:
+                        data = f['data'][:]  # Shape: (num_cases, num_timesteps, X, Y, Z)
+                        num_cases = data.shape[0]
+                        # Take first timestep of ALL cases
+                        all_state_data[state] = data[:, 0, :, :, :]  # (num_cases, X, Y, Z)
+                        print(f"   📦 Loaded {state}: shape {all_state_data[state].shape}")
+            
+            if not all_state_data:
+                print("   ❌ No state data found!")
+                return False
+            
+            print(f"   📊 Processing {num_cases} cases...")
+            
+            # Process in batches to avoid memory issues
+            batch_size = 100
+            all_z0 = []
+            
+            for batch_start in range(0, num_cases, batch_size):
+                batch_end = min(batch_start + batch_size, num_cases)
+                batch_indices = range(batch_start, batch_end)
+                
+                # Normalize and stack for this batch
+                batch_channels = []
+                for state in selected_states:
+                    if state in all_state_data:
+                        data = all_state_data[state][batch_start:batch_end]  # (batch, X, Y, Z)
+                        # Normalize
+                        if state in self.optimizer_config['norm_params']:
+                            params = self.optimizer_config['norm_params'][state]
+                            data = (data - params['min']) / (params['max'] - params['min'] + 1e-8)
+                        # Shape: (batch, X, Y, Z)
+                        batch_channels.append(torch.tensor(data, dtype=torch.float32))
+                
+                # Stack channels: (batch, num_channels, X, Y, Z)
+                spatial_batch = torch.stack([ch.unsqueeze(1) for ch in batch_channels], dim=2).squeeze(1).to(self.device)
+                
+                # Encode to latent space
+                with torch.no_grad():
+                    encoder_output = self.loaded_rom_model.model.encoder(spatial_batch)
+                    if isinstance(encoder_output, tuple):
+                        z0_batch = encoder_output[0]
+                    else:
+                        z0_batch = encoder_output
+                
+                all_z0.append(z0_batch.cpu())
+                
+                if (batch_start // batch_size) % 2 == 0:
+                    print(f"   📈 Encoded cases {batch_start}-{batch_end} of {num_cases}")
+            
+            # Concatenate all batches
+            z0_all = torch.cat(all_z0, dim=0).to(self.device)  # (num_cases, latent_dim)
+            
+            self.generated_z0_options = z0_all
+            self.optimizer_config['z0_options'] = z0_all
+            self.optimizer_config['z0_case_index'] = 'all'
+            
+            print(f"   ✅ Loaded ALL {num_cases} initial states!")
+            print(f"   Z0 shape: {z0_all.shape}")
+            print(f"   Z0 stats: mean={z0_all.mean().item():.4f}, std={z0_all.std().item():.4f}")
+            print(f"   🎲 Ready for RL-like random sampling!")
+            
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error generating all Z0 options: {e}")
             import traceback
             traceback.print_exc()
             return False

@@ -41,7 +41,7 @@ HYPERPARAMETER_GRID = {
     'batch_size': [64],
     'n_steps': [2],  # Available processed data files
     'n_channels': [4],  # Number of channels (2 for SW/SG, 4 for SW/SG/PRES/PERMI, etc.)
-    'latent_dim': [128],
+    'latent_dim': [130],
     # Learning rate scheduler
     'lr_scheduler_type': ['fixed'], #, 'reduce_on_plateau', 'exponential_decay', 'step_decay', 'cosine_annealing'],
     
@@ -55,6 +55,12 @@ HYPERPARAMETER_GRID = {
     
     # Adversarial training
     'adversarial_enable': [False],
+    
+    # VAE (Variational Autoencoder) configuration
+    'enable_vae': [True],                    # Enable VAE mode (reparameterization trick)
+    'enable_kl_loss': [True],                # Enable KL divergence loss (requires enable_vae=True)
+    'lambda_kl_loss': [0.00001],             # KL loss weight (beta in beta-VAE)
+    'enable_kl_annealing': [True],          # Enable step-wise KL annealing schedule
 }
 
 # Nested parameter grids (applied conditionally based on parent parameter values)
@@ -773,6 +779,27 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
             config.config['discriminator'] = {}
         config.config['discriminator']['enable'] = True
     
+    # Update VAE (Variational Autoencoder) configuration
+    if 'enable_vae' in hyperparams:
+        if 'model' not in config.config:
+            config.config['model'] = {}
+        config.config['model']['enable_vae'] = hyperparams['enable_vae']
+    
+    if 'enable_kl_loss' in hyperparams:
+        if 'loss' not in config.config:
+            config.config['loss'] = {}
+        config.config['loss']['enable_kl_loss'] = hyperparams['enable_kl_loss']
+    
+    if 'lambda_kl_loss' in hyperparams:
+        if 'loss' not in config.config:
+            config.config['loss'] = {}
+        config.config['loss']['lambda_kl_loss'] = hyperparams['lambda_kl_loss']
+    
+    if 'enable_kl_annealing' in hyperparams:
+        if 'loss' not in config.config:
+            config.config['loss'] = {}
+        config.config['loss']['enable_kl_annealing'] = hyperparams['enable_kl_annealing']
+    
     # Verify learning rate was not accidentally modified
     if config.training['learning_rate'] != original_lr:
         raise ValueError(f"Learning rate was modified! Expected {original_lr}, got {config.training['learning_rate']}")
@@ -865,6 +892,11 @@ def train_model(config: Config, loaded_data: Dict[str, Any],
     global_step = 0
     
     for e in range(config.training['epoch']):
+        # Update KL annealing at the start of each epoch
+        current_kl_lambda = my_rom.update_kl_annealing(e)
+        if current_kl_lambda is not None and e % 50 == 0:
+            print(f"   📊 KL Lambda: {current_kl_lambda:.6e}")
+        
         for ib in range(num_batch):
             ind0 = ib * config.training['batch_size']
             

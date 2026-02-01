@@ -744,16 +744,18 @@ class OptimizerResultsDashboard:
                         ha='center', va='center', fontsize=12)
                 ax1.set_title('NPV Components')
             
-            # Step-wise NPV (matching RL)
+            # Step-wise NPV (matching RL) - Convert to ANNUAL values (* 365)
             ax2 = axes[0, 1]
             if breakdown and 'step_npvs' in breakdown:
-                step_npvs = breakdown['step_npvs']
-                colors_bar = ['#27ae60' if v >= 0 else '#e74c3c' for v in step_npvs]
-                ax2.bar(range(len(step_npvs)), step_npvs, color=colors_bar, alpha=0.7)
+                step_npvs_raw = breakdown['step_npvs']
+                # Convert daily values to annual (each timestep = 1 year)
+                step_npvs_annual = [npv * 365 for npv in step_npvs_raw]
+                colors_bar = ['#27ae60' if v >= 0 else '#e74c3c' for v in step_npvs_annual]
+                ax2.bar(range(len(step_npvs_annual)), step_npvs_annual, color=colors_bar, alpha=0.7)
                 ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
                 ax2.set_xlabel('Timestep (Operational Year)')
-                ax2.set_ylabel('Step NPV ($M)')
-                ax2.set_title('NPV per Timestep')
+                ax2.set_ylabel('Annual Cashflow ($M/year)')
+                ax2.set_title('Annual Cashflow per Year')
                 ax2.grid(True, alpha=0.3)
             else:
                 ax2.text(0.5, 0.5, 'Step NPV data not available', 
@@ -764,16 +766,18 @@ class OptimizerResultsDashboard:
             ax3 = axes[1, 0]
             if breakdown and 'step_npvs' in breakdown:
                 # Create complete project timeline (pre-project + operational)
-                step_npvs = breakdown['step_npvs']
+                step_npvs_raw = breakdown['step_npvs']
+                # Convert daily values to annual (each timestep = 1 year)
+                step_npvs_annual = [npv * 365 for npv in step_npvs_raw]
                 
-                # Pre-project years: Fixed capital expenditure
+                # Pre-project years: Fixed capital expenditure (already annual)
                 pre_project_cashflows = []
                 for year in range(1, years_before + 1):
                     annual_capex = -capital_cost_per_year / scale_factor
                     pre_project_cashflows.append(annual_capex)
                 
-                # Operational cashflows (from optimization)
-                operational_cashflows = step_npvs
+                # Operational cashflows (now annual)
+                operational_cashflows = step_npvs_annual
                 
                 # Create year labels
                 pre_project_years = list(range(-years_before, 0))
@@ -826,34 +830,41 @@ class OptimizerResultsDashboard:
             ax4 = axes[1, 1]
             ax4.axis('off')
             
-            # Calculate project-level metrics
+            # Calculate project-level metrics (annualized: * 365)
             total_capex = years_before * capital_cost_per_year / scale_factor
-            operational_npv = self.result.optimal_objective
-            project_npv = operational_npv - total_capex
+            # Convert daily NPV to annual total (sum of annual cashflows)
+            operational_npv_annual = self.result.optimal_objective * 365
+            initial_npv_annual = self.result.initial_objective * 365
+            project_npv = operational_npv_annual - total_capex
             
             summary = f"""
-Economic Summary
+Economic Summary (Annualized)
 {'='*40}
 
 PROJECT-LEVEL ANALYSIS:
   Capital Investment: ${total_capex:.2f}M
   ({years_before} years × ${capital_cost_per_year/1e6:.0f}M/year)
   
-  Operational NPV: {operational_npv:.6f}
-  Project NPV: {project_npv:.6f}
+  Operational NPV: ${operational_npv_annual:.2f}M
+  Project NPV: ${project_npv:.2f}M
   
 OPTIMIZATION RESULTS:
-  Initial NPV: {self.result.initial_objective:.6f}
-  Optimal NPV: {self.result.optimal_objective:.6f}
+  Initial NPV: ${initial_npv_annual:.2f}M
+  Optimal NPV: ${operational_npv_annual:.2f}M
   Improvement: {self.result.improvement_ratio()*100:.2f}%
 
 """
             
             if breakdown:
-                summary += f"""COMPONENT BREAKDOWN:
-  Gas Inj Revenue: ${breakdown.get('gas_injection_revenue', 0):.2f}M
-  Water Penalty: ${breakdown.get('water_production_penalty', 0):.2f}M
-  Gas Prod Penalty: ${breakdown.get('gas_production_penalty', 0):.2f}M
+                # Annualize component breakdown (* 365)
+                gas_rev_annual = breakdown.get('gas_injection_revenue', 0) * 365
+                water_pen_annual = breakdown.get('water_production_penalty', 0) * 365
+                gas_pen_annual = breakdown.get('gas_production_penalty', 0) * 365
+                
+                summary += f"""COMPONENT BREAKDOWN (Annual):
+  Gas Inj Revenue: ${gas_rev_annual:.2f}M
+  Water Penalty: ${water_pen_annual:.2f}M
+  Gas Prod Penalty: ${gas_pen_annual:.2f}M
   
   Timesteps: {breakdown.get('num_steps', self.num_steps)}
 """

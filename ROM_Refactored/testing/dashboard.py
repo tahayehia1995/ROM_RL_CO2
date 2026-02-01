@@ -483,6 +483,74 @@ class TestingDashboard:
             print(f"⚠️ Warning: Could not extract latent_dim from weights: {e}")
             return None
     
+    def _extract_vae_enabled_from_weights(self, encoder_file):
+        """
+        Detect if encoder was trained with VAE mode (has fc_logvar layer).
+        
+        Args:
+            encoder_file: Path to encoder checkpoint file
+            
+        Returns:
+            True if VAE is enabled, False otherwise
+        """
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+            state_dict = torch.load(encoder_file, map_location=device, weights_only=False)
+            # VAE mode has fc_logvar layer for log-variance
+            return 'fc_logvar.weight' in state_dict
+        except Exception as e:
+            print(f"⚠️ Warning: Could not detect VAE mode from weights: {e}")
+            return False
+    
+    def _extract_encoder_hidden_dims_from_weights(self, transition_file):
+        """
+        Extract encoder_hidden_dims from transition model checkpoint weights.
+        
+        Args:
+            transition_file: Path to transition checkpoint file
+            
+        Returns:
+            List of hidden dimensions (e.g., [200, 200]) if successful, None otherwise
+        """
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+            state_dict = torch.load(transition_file, map_location=device, weights_only=False)
+            
+            # The trans_encoder is a Sequential of fc_bn_relu blocks
+            # Each block has structure: [Linear, BatchNorm1d, ReLU]
+            # Key pattern: trans_encoder.{layer_idx}.0.weight for Linear layer
+            # Weight shape is [out_features, in_features]
+            
+            hidden_dims = []
+            layer_idx = 0
+            
+            while True:
+                weight_key = f'trans_encoder.{layer_idx}.0.weight'
+                if weight_key not in state_dict:
+                    break
+                
+                weight_shape = state_dict[weight_key].shape
+                out_features = weight_shape[0]
+                
+                # Check if this is the output layer (output is latent_dim)
+                # The output layer connects to latent_dim, not a hidden dim
+                next_weight_key = f'trans_encoder.{layer_idx + 1}.0.weight'
+                if next_weight_key in state_dict:
+                    # This is a hidden layer, add its dimension
+                    hidden_dims.append(out_features)
+                # else: This is the output layer, don't add (it outputs latent_dim)
+                
+                layer_idx += 1
+            
+            if hidden_dims:
+                return hidden_dims
+            else:
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Warning: Could not extract encoder_hidden_dims from weights: {e}")
+            return None
+    
     def _update_config_from_model(self, model_info, latent_dim_from_weights=None):
         """
         Update config.yaml with parameters from selected model.
@@ -506,6 +574,9 @@ class TestingDashboard:
             n_channels = None
             latent_dim_actual = None
             
+            # Track if VAE mode is detected
+            vae_enabled = False
+            
             if encoder_file:
                 print("🔍 Extracting parameters from model weights...")
                 
@@ -515,6 +586,11 @@ class TestingDashboard:
                     print(f"   Found n_channels: {n_channels}")
                 else:
                     print("⚠️ Warning: Could not extract n_channels from weights. Using config value.")
+                
+                # Detect if VAE mode is enabled in the weights
+                vae_enabled = self._extract_vae_enabled_from_weights(encoder_file)
+                if vae_enabled:
+                    print(f"   Found VAE mode: enabled (fc_logvar layer detected)")
                 
                 # Extract latent_dim from weights (use provided value or extract)
                 if latent_dim_from_weights is not None:
@@ -576,12 +652,39 @@ class TestingDashboard:
                 config.config['encoder']['residual_blocks'] = model_info['residual_blocks']
                 print(f"   encoder.residual_blocks: {model_info['residual_blocks']}")
             
-            # Update encoder_hidden_dims if present in model_info and not None
+            # Update encoder_hidden_dims - extract from transition weights if not in model_info
+            encoder_hidden_dims = None
             if 'encoder_hidden_dims' in model_info and model_info['encoder_hidden_dims'] is not None:
+                encoder_hidden_dims = model_info['encoder_hidden_dims']
+            else:
+                # Try to extract from transition checkpoint weights
+                transition_file = model_info.get('transition')
+                if transition_file and os.path.exists(transition_file):
+                    encoder_hidden_dims = self._extract_encoder_hidden_dims_from_weights(transition_file)
+                    if encoder_hidden_dims:
+                        print(f"   Found encoder_hidden_dims from weights: {encoder_hidden_dims}")
+            
+            if encoder_hidden_dims is not None:
                 if 'transition' not in config.config:
                     config.config['transition'] = {}
-                config.config['transition']['encoder_hidden_dims'] = model_info['encoder_hidden_dims']
-                print(f"   transition.encoder_hidden_dims: {model_info['encoder_hidden_dims']}")
+                config.config['transition']['encoder_hidden_dims'] = encoder_hidden_dims
+                print(f"   transition.encoder_hidden_dims: {encoder_hidden_dims}")
+            
+            # Update VAE configuration based on detection from weights
+            if 'model' not in config.config:
+                config.config['model'] = {}
+            if 'loss' not in config.config:
+                config.config['loss'] = {}
+                
+            if vae_enabled:
+                config.config['model']['enable_vae'] = True
+                config.config['loss']['enable_kl_loss'] = True
+                print(f"   model.enable_vae: True")
+                print(f"   loss.enable_kl_loss: True")
+            else:
+                # Explicitly disable VAE if not detected (in case config had it enabled from previous model)
+                config.config['model']['enable_vae'] = False
+                config.config['loss']['enable_kl_loss'] = False
             
             # Save config back to file
             with open(config_path, 'w', encoding='utf-8') as f:
@@ -749,18 +852,22 @@ class TestingDashboard:
                 else:
                     print(f"   Transition: ⚠️ Not found (will use randomly initialized transition model)")
                 
-                # Load weights using the model's load_weights_from_file method
+                # Load weights using the model's load_weights_from_file method (handles VAE detection)
                 try:
-                    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
-                    
-                    # Load encoder and decoder weights
-                    self.my_rom.model.encoder.load_state_dict(torch.load(selected_model['encoder'], map_location=device))
-                    self.my_rom.model.decoder.load_state_dict(torch.load(selected_model['decoder'], map_location=device))
-                    
-                    # Load transition weights if available
+                    # Use the model's load_weights_from_file which handles VAE layer detection
                     if transition_file and os.path.exists(transition_file):
-                        self.my_rom.model.transition.load_state_dict(torch.load(transition_file, map_location=device))
+                        self.my_rom.model.load_weights_from_file(
+                            selected_model['encoder'],
+                            selected_model['decoder'],
+                            transition_file
+                        )
                     else:
+                        # Load encoder and decoder only
+                        device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+                        encoder_state = torch.load(selected_model['encoder'], map_location=device, weights_only=False)
+                        decoder_state = torch.load(selected_model['decoder'], map_location=device, weights_only=False)
+                        self.my_rom.model.encoder.load_state_dict(encoder_state)
+                        self.my_rom.model.decoder.load_state_dict(decoder_state)
                         print("   ⚠️ Transition model weights not found - using randomly initialized transition model")
                     
                     print("✅ Model loaded successfully!")

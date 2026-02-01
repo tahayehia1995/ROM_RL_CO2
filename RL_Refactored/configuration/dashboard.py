@@ -830,7 +830,12 @@ def generate_z0_from_dashboard(rl_config, rom_model, device):
     
     with torch.no_grad():
         try:
-            z0_options = rom_model.model.encoder(state_t_seq)
+            # Encoder returns (z, mean, logvar) tuple - extract z (first element)
+            encoder_output = rom_model.model.encoder(state_t_seq)
+            if isinstance(encoder_output, tuple):
+                z0_options = encoder_output[0]  # First element is z (or mean in AE mode)
+            else:
+                z0_options = encoder_output
             
             # Validate ROM encoder output
             if torch.isnan(z0_options).any():
@@ -847,8 +852,8 @@ def generate_z0_from_dashboard(rl_config, rom_model, device):
         except Exception as e:
             print(f"   🚨 ROM encoder failed: {e}")
             print("   Using zero-initialized Z0 options as fallback.")
-            # Create safe fallback Z0 with correct shape
-            latent_dim = 64  # From config
+            # Create safe fallback Z0 with correct shape from model config
+            latent_dim = getattr(rom_model.model.encoder, 'latent_dim', 128)
             z0_options = torch.zeros((state_t_seq.shape[0], latent_dim), device=state_t_seq.device)
 
     print(f"✅ Multiple realistic Z0 options generated from ROM encoder!")
@@ -1622,6 +1627,7 @@ class RLConfigurationDashboard:
             'run': r'run(\d+)',  # Grid search run number
             'num_train': r'nt(\d+)',  # Number of training samples
             'learning_rate': r'lr([\d\.e\-]+)',  # Learning rate (may be scientific notation)
+            'residual_blocks': r'_rb(\d+)',  # Residual blocks
         }
         
         for param, pattern in patterns.items():
@@ -1645,6 +1651,17 @@ class RLConfigurationDashboard:
             match = re.search(r'_l(\d+)_', filename)
             if match:
                 info['latent'] = int(match.group(1))
+        
+        # Extract encoder_hidden_dims from filename (pattern: _ehd{dim1}-{dim2}-...)
+        # This is critical for matching the transition model architecture
+        ehd_match = re.search(r'_ehd([\d-]+)', filename)
+        if ehd_match:
+            ehd_str = ehd_match.group(1)
+            # Parse dimensions separated by hyphens (e.g., "300-300" or "200-200-200")
+            try:
+                info['encoder_hidden_dims'] = [int(dim) for dim in ehd_str.split('-')]
+            except ValueError:
+                pass  # Keep default if parsing fails
         
         return info
     
@@ -1683,6 +1700,81 @@ class RLConfigurationDashboard:
         except Exception as e:
             print(f"Error reading {state_name}: {e}")
             return 0.0
+    
+    def _infer_encoder_hidden_dims_from_checkpoint(self, transition_file):
+        """
+        Infer encoder_hidden_dims from saved transition checkpoint weights.
+        
+        This analyzes the trans_encoder layer shapes to determine the hidden dimensions
+        used during training, which is critical for loading weights correctly.
+        
+        Args:
+            transition_file: Path to the transition model checkpoint (.h5 file)
+            
+        Returns:
+            List of hidden dimensions (e.g., [200, 200]) or None if cannot infer
+        """
+        try:
+            import torch
+            
+            # Load checkpoint to examine weights
+            state_dict = torch.load(transition_file, map_location='cpu')
+            
+            # The trans_encoder is a Sequential of fc_bn_relu blocks
+            # Each block has structure: [Linear, BatchNorm1d, ReLU]
+            # Key pattern: trans_encoder.{layer_idx}.0.weight for Linear layer
+            # Weight shape is [out_features, in_features]
+            
+            hidden_dims = []
+            layer_idx = 0
+            
+            while True:
+                weight_key = f'trans_encoder.{layer_idx}.0.weight'
+                if weight_key not in state_dict:
+                    break
+                
+                weight_shape = state_dict[weight_key].shape
+                out_features = weight_shape[0]
+                
+                # Check if this is the output layer (output is latent_dim = input_dim - 1)
+                # The output layer connects to latent_dim, not a hidden dim
+                next_weight_key = f'trans_encoder.{layer_idx + 1}.0.weight'
+                if next_weight_key in state_dict:
+                    # This is a hidden layer, add its dimension
+                    hidden_dims.append(out_features)
+                # else: This is the output layer, don't add (it outputs latent_dim)
+                
+                layer_idx += 1
+            
+            if hidden_dims:
+                return hidden_dims
+            else:
+                # Fallback: couldn't parse structure
+                print("      ⚠️ Could not parse layer structure, using default [200, 200]")
+                return [200, 200]
+                
+        except Exception as e:
+            print(f"      ⚠️ Error inferring encoder_hidden_dims: {e}")
+            # Return default as fallback
+            return [200, 200]
+    
+    def _detect_vae_from_weights(self, encoder_file):
+        """
+        Detect if encoder weights contain VAE layers (fc_logvar).
+        
+        Args:
+            encoder_file: Path to the encoder model checkpoint (.h5 file)
+            
+        Returns:
+            True if VAE is enabled, False otherwise
+        """
+        try:
+            import torch
+            state_dict = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return 'fc_logvar.weight' in state_dict
+        except Exception as e:
+            print(f"      ⚠️ Error detecting VAE mode: {e}")
+            return False
         
     def _update_state_tab(self):
         """Update the state selection tab"""
@@ -2552,10 +2644,68 @@ Where:
                     print(f"      ✅ Updated n_channels: {rom_config.model.get('n_channels')} → {channels}")
                     config_updated = True
             
+            # 🎯 CRITICAL: Update encoder_hidden_dims for transition model architecture
+            # This is essential to match the saved checkpoint's transition encoder structure
+            encoder_hidden_dims = None
+            
+            # First try to get from filename
+            if 'encoder_hidden_dims' in model_info and model_info['encoder_hidden_dims'] is not None:
+                encoder_hidden_dims = model_info['encoder_hidden_dims']
+                print(f"      📄 encoder_hidden_dims from filename: {encoder_hidden_dims}")
+            else:
+                # Fallback: Infer architecture from saved checkpoint weights
+                print("      🔍 encoder_hidden_dims not in filename, inferring from checkpoint...")
+                encoder_hidden_dims = self._infer_encoder_hidden_dims_from_checkpoint(
+                    selected_rom['transition']
+                )
+                if encoder_hidden_dims:
+                    print(f"      🔎 Inferred encoder_hidden_dims from checkpoint: {encoder_hidden_dims}")
+            
+            if encoder_hidden_dims is not None:
+                current_ehd = rom_config.config.get('transition', {}).get('encoder_hidden_dims', [200, 200])
+                if encoder_hidden_dims != current_ehd:
+                    if 'transition' not in rom_config.config:
+                        rom_config.config['transition'] = {}
+                    rom_config.config['transition']['encoder_hidden_dims'] = encoder_hidden_dims
+                    print(f"      ✅ Updated transition.encoder_hidden_dims: {current_ehd} → {encoder_hidden_dims}")
+                    config_updated = True
+                else:
+                    print(f"      📊 transition.encoder_hidden_dims already matches: {encoder_hidden_dims}")
+            
+            # Update residual_blocks if found
+            if 'residual_blocks' in model_info and model_info['residual_blocks'] is not None:
+                residual_blocks = model_info['residual_blocks']
+                current_rb = rom_config.config.get('encoder', {}).get('residual_blocks', 3)
+                if residual_blocks != current_rb:
+                    if 'encoder' not in rom_config.config:
+                        rom_config.config['encoder'] = {}
+                    rom_config.config['encoder']['residual_blocks'] = residual_blocks
+                    print(f"      ✅ Updated encoder.residual_blocks: {current_rb} → {residual_blocks}")
+                    config_updated = True
+            
             if config_updated:
                 print("   ✅ ROM config updated to match selected model architecture")
             else:
                 print("   ✅ ROM config matches selected model (no updates needed)")
+            
+            # Detect VAE mode from encoder weights
+            encoder_file = self.config['selected_rom']['encoder']
+            vae_enabled = self._detect_vae_from_weights(encoder_file)
+            
+            # Ensure model and loss config sections exist
+            if 'model' not in rom_config.config:
+                rom_config.config['model'] = {}
+            if 'loss' not in rom_config.config:
+                rom_config.config['loss'] = {}
+            
+            if vae_enabled:
+                rom_config.config['model']['enable_vae'] = True
+                rom_config.config['loss']['enable_kl_loss'] = True
+                print(f"   📊 VAE mode: enabled (detected from weights)")
+            else:
+                # Explicitly disable VAE if not detected (config might have it enabled from previous model)
+                rom_config.config['model']['enable_vae'] = False
+                rom_config.config['loss']['enable_kl_loss'] = False
             
             # Note: ROM config doesn't need RL-specific updates
             # The ROM model will be initialized with ROM config as-is

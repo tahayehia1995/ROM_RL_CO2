@@ -17,6 +17,9 @@ class Encoder(nn.Module):
         self.sigma = config.model['sigma']
         self.input_shape = config.data['input_shape']
         
+        # VAE mode flag
+        self.enable_vae = config.model.get('enable_vae', False)
+        
         # Build CNN layers from config with skip connection support
         conv_config = config['encoder']['conv_layers']
         
@@ -85,8 +88,31 @@ class Encoder(nn.Module):
         self.fc_mean = nn.Linear(flattened_size, latent_dim)
         self.fc_mean.apply(weights_init)
         
+        # VAE: Add log-variance layer if VAE mode enabled
+        if self.enable_vae:
+            self.fc_logvar = nn.Linear(flattened_size, latent_dim)
+            self.fc_logvar.apply(weights_init)
+            if config['runtime']['verbose']:
+                print(f"🔧 ENCODER: VAE mode enabled - added fc_logvar layer")
+        
         # Store dimensions for decoder
         self.flattened_size = flattened_size
+        self.latent_dim = latent_dim
+
+    def reparameterize(self, mu, logvar):
+        """
+        Reparameterization trick for VAE.
+        Samples z = mu + eps * std where eps ~ N(0, I)
+        
+        Args:
+            mu: Mean of latent distribution (batch, latent_dim)
+            logvar: Log variance of latent distribution (batch, latent_dim)
+        Returns:
+            z: Sampled latent vector
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def forward(self, x):
         # Layer 1
@@ -108,5 +134,12 @@ class Encoder(nn.Module):
         x_flattened = self.flatten(x)
         xi_mean = self.fc_mean(x_flattened)
         
-        return xi_mean
+        # VAE mode: compute log-variance and sample
+        if self.enable_vae:
+            xi_logvar = self.fc_logvar(x_flattened)
+            z = self.reparameterize(xi_mean, xi_logvar)
+            return z, xi_mean, xi_logvar
+        
+        # Deterministic AE mode: return mean only (with None placeholders for compatibility)
+        return xi_mean, None, None
 

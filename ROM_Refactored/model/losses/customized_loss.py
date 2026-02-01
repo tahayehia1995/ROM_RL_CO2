@@ -11,7 +11,8 @@ from .individual_losses import (
     get_flux_loss,
     get_well_bhp_loss,
     get_l2_reg_loss,
-    get_non_negative_loss
+    get_non_negative_loss,
+    get_kl_divergence_loss
 )
 from .spatial_enhancements import GradientLoss
 
@@ -25,6 +26,19 @@ class CustomizedLoss(nn.Module):
         self.enable_flux_loss = config.loss.get('enable_flux_loss', False)
         self.enable_bhp_loss = config.loss.get('enable_bhp_loss', False)
         self.enable_non_negative_loss = config.loss.get('enable_non_negative_loss', False)
+        
+        # VAE KL divergence loss configuration
+        self.enable_kl_loss = config.loss.get('enable_kl_loss', False)
+        self.kl_loss_lambda = config.loss.get('lambda_kl_loss', 0.001)  # beta in beta-VAE
+        
+        # KL Annealing configuration
+        self.enable_kl_annealing = config.loss.get('enable_kl_annealing', False)
+        self.kl_annealing_schedule = config.loss.get('kl_annealing_schedule', [])
+        self.current_epoch = 0
+        
+        # If annealing is enabled, start with the first schedule value (typically 0)
+        if self.enable_kl_annealing and self.kl_annealing_schedule:
+            self.kl_loss_lambda = self.kl_annealing_schedule[0].get('lambda', 0.0)
         
         # Dynamic loss weighting configuration
         self.enable_dynamic_weighting = config.loss.get('enable_dynamic_weighting', False)
@@ -200,9 +214,15 @@ class CustomizedLoss(nn.Module):
         return torch.tensor(locations_list, dtype=torch.long)
 
     def forward(self, pred, discriminator_pred=None):
-        # Parse y_pred
-        # X_next_pred, X_next, Z_next_pred, Z_next, Yobs_pred, Yobs, z0, x0, x0_rec, perm = pred
-        X_next_pred, X_next, Z_next_pred, Z_next, Yobs_pred, Yobs, z0, x0, x0_rec = pred
+        # Parse predictions - now includes VAE parameters (mu_list, logvar_list)
+        # X_next_pred, X_next, Z_next_pred, Z_next, Yobs_pred, Yobs, z0, x0, x0_rec, mu_list, logvar_list = pred
+        if len(pred) == 11:
+            # VAE mode: includes mu_list and logvar_list
+            X_next_pred, X_next, Z_next_pred, Z_next, Yobs_pred, Yobs, z0, x0, x0_rec, mu_list, logvar_list = pred
+        else:
+            # Legacy mode: no VAE parameters
+            X_next_pred, X_next, Z_next_pred, Z_next, Yobs_pred, Yobs, z0, x0, x0_rec = pred
+            mu_list, logvar_list = None, None
 
         # ===== ORIGINAL LOSS COMPONENTS =====
         loss_rec_t = get_reconstruction_loss(x0, x0_rec, self.reconstruction_variance)
@@ -298,6 +318,17 @@ class CustomizedLoss(nn.Module):
             predicted_observations = Yobs_pred
             non_negative_loss = get_non_negative_loss(reconstructed_states, predicted_observations)
 
+        # ===== VAE KL DIVERGENCE LOSS =====
+        kl_loss = 0
+        if self.enable_kl_loss and mu_list is not None and logvar_list is not None:
+            # Compute KL loss for all encoder outputs
+            for mu, logvar in zip(mu_list, logvar_list):
+                if mu is not None and logvar is not None:
+                    kl_loss += get_kl_divergence_loss(mu, logvar, reduction='mean')
+            # Average over all encoded states
+            if len(mu_list) > 0:
+                kl_loss = kl_loss / len(mu_list)
+
         # ===== COMBINE ALL LOSSES =====
         self.flux_loss = loss_flux_t + loss_flux_t1
         
@@ -313,6 +344,7 @@ class CustomizedLoss(nn.Module):
         self.gradient_loss = gradient_loss
         self.adversarial_loss = adversarial_loss
         self.non_negative_loss = non_negative_loss
+        self.kl_loss = kl_loss
         
         # Apply dynamic loss weighting if enabled
         if self.enable_dynamic_weighting:
@@ -365,12 +397,13 @@ class CustomizedLoss(nn.Module):
                         updated_weights['observation'] * loss_yobs
                     )
                 
-                # Add spatial enhancements (not included in dynamic weighting)
+                # Add spatial enhancements and VAE KL loss (not included in dynamic weighting)
                 self.total_loss = (
                     weighted_loss +
                     self.gradient_loss_weight * gradient_loss +
                     self.adversarial_loss_weight * adversarial_loss +
-                    self.non_negative_loss_lambda * non_negative_loss
+                    self.non_negative_loss_lambda * non_negative_loss +
+                    self.kl_loss_lambda * kl_loss
                 )
                 
                 # Store current weights for monitoring
@@ -387,7 +420,8 @@ class CustomizedLoss(nn.Module):
                     self.yobs_loss_weight * loss_yobs +
                     self.gradient_loss_weight * gradient_loss +
                     self.adversarial_loss_weight * adversarial_loss +
-                    self.non_negative_loss_lambda * non_negative_loss
+                    self.non_negative_loss_lambda * non_negative_loss +
+                    self.kl_loss_lambda * kl_loss
                 )
         else:
             # Static loss weighting (original implementation)
@@ -398,7 +432,8 @@ class CustomizedLoss(nn.Module):
                 self.yobs_loss_weight * loss_yobs +
                 self.gradient_loss_weight * gradient_loss +
                 self.adversarial_loss_weight * adversarial_loss +
-                self.non_negative_loss_lambda * non_negative_loss
+                self.non_negative_loss_lambda * non_negative_loss +
+                self.kl_loss_lambda * kl_loss
             )
 
         return self.total_loss
@@ -423,6 +458,38 @@ class CustomizedLoss(nn.Module):
     
     def getNonNegativeLoss(self):
         return self.non_negative_loss
+    
+    def getKLLoss(self):
+        """Get KL divergence loss (VAE)."""
+        return self.kl_loss
+    
+    def getKLLambda(self):
+        """Get current KL loss weight (lambda)."""
+        return self.kl_loss_lambda
+    
+    def update_kl_lambda_for_epoch(self, epoch):
+        """
+        Update KL lambda based on annealing schedule.
+        
+        Args:
+            epoch: Current training epoch
+            
+        Returns:
+            Current KL lambda value
+        """
+        self.current_epoch = epoch
+        
+        if not self.enable_kl_annealing:
+            return self.kl_loss_lambda
+        
+        # Find the appropriate lambda for this epoch from the schedule
+        current_lambda = 0.0
+        for entry in self.kl_annealing_schedule:
+            if epoch >= entry.get('epoch', 0):
+                current_lambda = entry.get('lambda', 0.0)
+        
+        self.kl_loss_lambda = current_lambda
+        return current_lambda
     
     def setModelReference(self, model):
         """Set model reference for dynamic loss weighting (specifically for GradNorm)."""
