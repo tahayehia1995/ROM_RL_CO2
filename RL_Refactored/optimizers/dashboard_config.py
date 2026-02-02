@@ -136,7 +136,7 @@ class OptimizerConfigDashboard:
     OPTIMIZER_TYPES = {
         'LS-SQP-StoSAG': {
             'name': 'LS-SQP with StoSAG',
-            'description': 'Line-Search SQP with Stochastic Simplex Approximate Gradients (single realization)',
+            'description': 'Line-Search SQP with Stochastic Simplex Approximate Gradients (gradient-based)',
             'params': {
                 'gradient_type': {'type': 'dropdown', 'default': 'spsa', 
                                   'options': [
@@ -155,11 +155,109 @@ class OptimizerConfigDashboard:
                 'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
                              'description': 'Convergence tolerance'}
             }
+        },
+        'Differential-Evolution': {
+            'name': 'Differential Evolution',
+            'description': 'Global optimization using population-based search (derivative-free)',
+            'params': {
+                'popsize': {'type': 'int', 'default': 15, 'min': 5, 'max': 50,
+                           'description': 'Population size multiplier'},
+                'mutation': {'type': 'float', 'default': 0.8, 'min': 0.1, 'max': 2.0,
+                            'description': 'Mutation constant (F)'},
+                'recombination': {'type': 'float', 'default': 0.7, 'min': 0.0, 'max': 1.0,
+                                  'description': 'Crossover probability (CR)'},
+                'strategy': {'type': 'dropdown', 'default': 'best1bin',
+                            'options': [
+                                ('best1bin (fast convergence)', 'best1bin'),
+                                ('best2bin (more exploration)', 'best2bin'),
+                                ('rand1bin (most exploration)', 'rand1bin'),
+                                ('currenttobest1bin (balanced)', 'currenttobest1bin')
+                            ],
+                            'description': 'DE strategy'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'Dual-Annealing': {
+            'name': 'Dual Annealing',
+            'description': 'Simulated annealing with local search refinement (derivative-free)',
+            'params': {
+                'initial_temp': {'type': 'float', 'default': 5230.0, 'min': 100.0, 'max': 50000.0,
+                                'description': 'Initial temperature'},
+                'restart_temp_ratio': {'type': 'float', 'default': 2e-5, 'min': 1e-6, 'max': 1e-3,
+                                       'description': 'Restart temperature ratio'},
+                'visit': {'type': 'float', 'default': 2.62, 'min': 1.0, 'max': 3.0,
+                         'description': 'Visiting distribution parameter'},
+                'accept': {'type': 'float', 'default': -5.0, 'min': -10.0, 'max': -1.0,
+                          'description': 'Acceptance distribution parameter'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 1000,
+                                   'description': 'Maximum iterations'}
+            }
+        },
+        'Basin-Hopping': {
+            'name': 'Basin Hopping',
+            'description': 'Monte Carlo + local optimization (finds global minima)',
+            'params': {
+                'niter': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                         'description': 'Number of basin hopping iterations'},
+                'T': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 10.0,
+                     'description': 'Temperature for Metropolis criterion'},
+                'stepsize': {'type': 'float', 'default': 0.5, 'min': 0.1, 'max': 1.0,
+                            'description': 'Initial step size for random displacement'}
+            }
+        },
+        'CMA-ES': {
+            'name': 'CMA-ES',
+            'description': 'Covariance Matrix Adaptation Evolution Strategy (state-of-the-art)',
+            'params': {
+                'sigma0': {'type': 'float', 'default': 0.3, 'min': 0.1, 'max': 0.5,
+                          'description': 'Initial step size (sigma)'},
+                'popsize': {'type': 'int', 'default': 0, 'min': 0, 'max': 200,
+                           'description': 'Population size (0 = automatic)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'PSO': {
+            'name': 'Particle Swarm Optimization',
+            'description': 'Population-based swarm intelligence optimizer (derivative-free)',
+            'params': {
+                'n_particles': {'type': 'int', 'default': 30, 'min': 10, 'max': 100,
+                               'description': 'Number of particles in swarm'},
+                'c1': {'type': 'float', 'default': 2.0, 'min': 0.5, 'max': 4.0,
+                      'description': 'Cognitive parameter (personal best attraction)'},
+                'c2': {'type': 'float', 'default': 2.0, 'min': 0.5, 'max': 4.0,
+                      'description': 'Social parameter (global best attraction)'},
+                'w': {'type': 'float', 'default': 0.7, 'min': 0.1, 'max': 1.0,
+                     'description': 'Inertia weight (momentum)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum iterations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'GA': {
+            'name': 'Genetic Algorithm',
+            'description': 'Evolutionary optimization with selection, crossover, mutation',
+            'params': {
+                'population_size': {'type': 'int', 'default': 50, 'min': 20, 'max': 200,
+                                   'description': 'Number of individuals in population'},
+                'crossover_prob': {'type': 'float', 'default': 0.7, 'min': 0.0, 'max': 1.0,
+                                  'description': 'Crossover probability'},
+                'mutation_prob': {'type': 'float', 'default': 0.2, 'min': 0.01, 'max': 0.5,
+                                 'description': 'Mutation probability per gene'},
+                'elitism': {'type': 'int', 'default': 2, 'min': 0, 'max': 10,
+                           'description': 'Number of elite individuals to preserve'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
         }
-        # Future optimizers can be added here:
-        # 'GA': {...},
-        # 'PSO': {...},
-        # 'EnOpt': {...},
     }
     
     def __init__(self, config_path: str = 'config.yaml'):
