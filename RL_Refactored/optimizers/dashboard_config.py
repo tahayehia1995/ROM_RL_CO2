@@ -292,6 +292,7 @@ class OptimizerConfigDashboard:
             'available_states': [],
             'selected_states': ['SW', 'SG', 'PRES'],
             'optimizer_type': 'LS-SQP-StoSAG',
+            'init_strategy': 'midpoint',
             'optimizer_params': {},
             'action_ranges': {},
             'economic_params': {},
@@ -482,6 +483,17 @@ class OptimizerConfigDashboard:
         
         self.states_tab.children = state_widgets
     
+    # Initialization strategies for all optimizers
+    INIT_STRATEGIES = {
+        'midpoint': 'Midpoint (0.5) - Center of control range',
+        'random': 'Random - Uniform random in [0,1]',
+        'low': 'Low (0.1) - 10% of range',
+        'naive_zero': 'Naive Zero - Minimum controls (0.0)',
+        'naive_max': 'Naive Max - Maximum controls (1.0)',
+        'naive_low_bhp_high_gas': 'Naive Low BHP + High Gas',
+        'naive_high_bhp_low_gas': 'Naive High BHP + Low Gas'
+    }
+    
     def _populate_optimizer_tab(self):
         """Populate optimizer selection and parameters tab."""
         # Optimizer type dropdown
@@ -490,6 +502,16 @@ class OptimizerConfigDashboard:
             options=optimizer_options,
             value='LS-SQP-StoSAG',
             description='Optimizer:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='50%')
+        )
+        
+        # Initialization strategy dropdown
+        init_options = [(v, k) for k, v in self.INIT_STRATEGIES.items()]
+        self.init_strategy_dropdown = widgets.Dropdown(
+            options=init_options,
+            value='midpoint',
+            description='Initialization:',
             style={'description_width': '100px'},
             layout=widgets.Layout(width='50%')
         )
@@ -504,6 +526,8 @@ class OptimizerConfigDashboard:
             widgets.HTML("<h3>⚙️ Optimizer Configuration</h3>"),
             self.optimizer_type_dropdown,
             self.optimizer_desc_html,
+            widgets.HTML("<h4>Initialization Strategy:</h4>"),
+            self.init_strategy_dropdown,
             widgets.HTML("<h4>Parameters:</h4>"),
             self.optimizer_params_box
         ]
@@ -910,6 +934,7 @@ class OptimizerConfigDashboard:
         
         # Optimizer type and params
         self.optimizer_config['optimizer_type'] = self.optimizer_type_dropdown.value
+        self.optimizer_config['init_strategy'] = self.init_strategy_dropdown.value
         self.optimizer_config['optimizer_params'] = {
             name: widget.value for name, widget in self.param_inputs.items()
         }
@@ -1313,6 +1338,7 @@ class OptimizerConfigDashboard:
         """Print configuration summary."""
         print(f"\n{'='*50}")
         print(f"Optimizer: {self.optimizer_config['optimizer_type']}")
+        print(f"Initialization: {self.optimizer_config.get('init_strategy', 'midpoint')}")
         print(f"ROM Model: {self.optimizer_config['selected_rom']['name']}")
         print(f"States: {self.optimizer_config['selected_states']}")
         print(f"Timesteps: {self.optimizer_config['num_steps']}")
@@ -1333,6 +1359,7 @@ class OptimizerConfigDashboard:
         
         return {
             'optimizer_type': self.optimizer_config['optimizer_type'],
+            'init_strategy': self.optimizer_config.get('init_strategy', 'midpoint'),
             'rom_model': self.loaded_rom_model,
             'config': self.config,
             'norm_params': self.optimizer_config['norm_params'],
@@ -1341,6 +1368,7 @@ class OptimizerConfigDashboard:
             'z0_case_index': self.optimizer_config.get('z0_case_index', 0),
             'num_steps': self.optimizer_config['num_steps'],
             'action_ranges': self.optimizer_config['action_ranges'],
+            'optimizer_params': opt_params,  # Pass all optimizer params
             'stosag_params': {
                 'num_realizations': 1,  # Single realization mode
                 'perturbation_size': opt_params.get('perturbation_size', 0.01),

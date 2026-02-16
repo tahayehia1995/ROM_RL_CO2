@@ -54,7 +54,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         line_search_params: Optional[Dict] = None,
         control_parameterization: str = 'full',  # 'full', 'piecewise', 'polynomial'
         num_control_periods: int = 6,  # For piecewise parameterization
-        spsa_num_samples: int = 5  # Number of SPSA gradient samples to average
+        spsa_num_samples: int = 5,  # Number of SPSA gradient samples to average
+        init_strategy: str = 'midpoint'
     ):
         """
         Initialize LS-SQP optimizer with StoSAG.
@@ -86,8 +87,9 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
                 - 'polynomial': Polynomial representation (very few vars)
             num_control_periods: Number of periods for piecewise parameterization
             spsa_num_samples: Number of random perturbations to average in SPSA
+            init_strategy: Initialization strategy ('midpoint', 'random', 'naive_zero', etc.)
         """
-        super().__init__(rom_model, config, norm_params, device, action_ranges)
+        super().__init__(rom_model, config, norm_params, device, action_ranges, init_strategy)
         
         self.num_realizations = num_realizations
         self.perturbation_size = perturbation_size
@@ -257,8 +259,8 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         # Run ROM sensitivity test
         self.test_rom_sensitivity(self.z0_ensemble[0:1])
         
-        # Generate initial guess
-        x0 = self.generate_initial_guess(num_steps, strategy='midpoint')
+        # Generate initial guess using configured strategy
+        x0 = self.generate_initial_guess(num_steps, strategy=self.init_strategy)
         
         # Evaluate initial objective
         initial_obj, _ = self.evaluate_robust_objective(

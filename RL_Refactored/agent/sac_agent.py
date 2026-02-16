@@ -243,19 +243,37 @@ class SAC(object):
         # Return all values
         return critic1_loss_val, critic2_loss_val, policy_loss_val, alpha_loss_val, alpha_val
 
-    # Save model parameters
+    # Save model parameters with architecture info
     def save_checkpoint(self, env_name, suffix="", ckpt_path=None):
         if not os.path.exists('checkpoints/'):
             os.makedirs('checkpoints/')
         if ckpt_path is None:
             ckpt_path = "checkpoints/sac_checkpoint_{}_{}".format(env_name, suffix)
-        torch.save({'policy_state_dict': self.policy.state_dict(),
-                    'critic_state_dict': self.critic.state_dict(),
-                    'critic_target_state_dict': self.critic_target.state_dict(),
-                    'critic_optimizer_state_dict': self.critic_optim.state_dict(),
-                    'policy_optimizer_state_dict': self.policy_optim.state_dict()}, ckpt_path)
+        
+        # Extract architecture information from config
+        architecture_info = {
+            'hidden_dim': self.config.rl_model['networks']['hidden_dim'],
+            'policy_type': self.config.rl_model['networks']['policy']['type'],
+            'state_dim': list(self.policy.parameters())[0].shape[1],  # Input dimension
+            'action_dim': self.config.rl_model['reservoir']['num_producers'] + 
+                         self.config.rl_model['reservoir']['num_injectors'],
+            'num_producers': self.config.rl_model['reservoir']['num_producers'],
+            'num_injectors': self.config.rl_model['reservoir']['num_injectors'],
+        }
+        
+        torch.save({
+            'policy_state_dict': self.policy.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'critic_target_state_dict': self.critic_target.state_dict(),
+            'critic_optimizer_state_dict': self.critic_optim.state_dict(),
+            'policy_optimizer_state_dict': self.policy_optim.state_dict(),
+            'architecture': architecture_info,  # NEW: Save architecture info
+        }, ckpt_path)
+        
+        print(f"  Checkpoint saved with architecture: hidden_dim={architecture_info['hidden_dim']}, "
+              f"policy_type={architecture_info['policy_type']}")
 
-    # Load model parameters
+    # Load model parameters with architecture validation
     def load_checkpoint(self, ckpt_path, evaluate=False):
         import os
         
@@ -263,7 +281,67 @@ class SAC(object):
         
         if ckpt_path is not None and os.path.exists(ckpt_path):
             try:
-                checkpoint = torch.load(ckpt_path)
+                checkpoint = torch.load(ckpt_path, weights_only=False)
+                
+                # Check for architecture info and validate
+                if 'architecture' in checkpoint:
+                    arch = checkpoint['architecture']
+                    current_hidden = self.config.rl_model['networks']['hidden_dim']
+                    current_policy = self.config.rl_model['networks']['policy']['type']
+                    
+                    print(f"  Checkpoint architecture: hidden_dim={arch.get('hidden_dim')}, "
+                          f"policy_type={arch.get('policy_type')}")
+                    print(f"  Current config:          hidden_dim={current_hidden}, "
+                          f"policy_type={current_policy}")
+                    
+                    # Check for mismatches
+                    mismatches = []
+                    if arch.get('hidden_dim') != current_hidden:
+                        mismatches.append(f"hidden_dim: checkpoint={arch.get('hidden_dim')} vs config={current_hidden}")
+                    
+                    policy_type_mismatch = arch.get('policy_type') != current_policy
+                    if policy_type_mismatch:
+                        mismatches.append(f"policy_type: checkpoint={arch.get('policy_type')} vs config={current_policy}")
+                    
+                    # Hard mismatches (hidden_dim) cannot be auto-fixed
+                    hard_mismatches = [m for m in mismatches if 'hidden_dim' in m]
+                    if hard_mismatches:
+                        print("\n" + "="*60)
+                        print("⚠️  ARCHITECTURE MISMATCH DETECTED")
+                        print("="*60)
+                        for m in mismatches:
+                            print(f"   - {m}")
+                        print("\nTo fix this, update config.yaml to match checkpoint:")
+                        print(f"   hidden_dim: {arch.get('hidden_dim')}")
+                        print(f"   policy.type: '{arch.get('policy_type')}'")
+                        print("="*60 + "\n")
+                        raise ValueError(f"Architecture mismatch: {', '.join(hard_mismatches)}")
+                    
+                    # Auto-fix policy type mismatch by rebuilding the policy network
+                    if policy_type_mismatch and not hard_mismatches:
+                        ckpt_policy_type = arch.get('policy_type')
+                        print(f"\n  🔄 Auto-adapting policy type: {current_policy} → {ckpt_policy_type}")
+                        
+                        num_inputs = list(self.policy.parameters()).__next__().shape[1]
+                        num_actions = self.config.rl_model['reservoir']['num_producers'] + \
+                                      self.config.rl_model['reservoir']['num_injectors']
+                        policy_lr = self.config.rl_model['sac']['learning_rates']['policy']
+                        
+                        if ckpt_policy_type == 'deterministic':
+                            self.policy = DeterministicPolicy(num_inputs, num_actions, self.config).to(self.device)
+                        else:
+                            self.policy = GaussianPolicy(num_inputs, num_actions, self.config).to(self.device)
+                        
+                        self.policy_optim = Adam(self.policy.parameters(), lr=policy_lr)
+                        
+                        # Update config to match checkpoint for consistency
+                        self.config.rl_model['networks']['policy']['type'] = ckpt_policy_type
+                        print(f"  ✅ Policy rebuilt as {ckpt_policy_type} and config updated")
+                else:
+                    print("  Note: Checkpoint doesn't contain architecture info (legacy format)")
+                    print("  Attempting to load anyway - may fail if architecture differs")
+                
+                # Load state dicts
                 self.policy.load_state_dict(checkpoint['policy_state_dict'])
                 self.critic.load_state_dict(checkpoint['critic_state_dict'])
                 self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
@@ -279,7 +357,7 @@ class SAC(object):
                     self.critic.train()
                     self.critic_target.train()
                     
-                print("Checkpoint loaded successfully.")
+                print("✅ Checkpoint loaded successfully.")
                 return True
             except Exception as e:
                 print(f"Error loading checkpoint: {e}")
@@ -289,6 +367,67 @@ class SAC(object):
             print(f"Checkpoint file not found at {ckpt_path}")
             print("Continuing with randomly initialized models.")
             return False
+    
+    @staticmethod
+    def inspect_checkpoint(ckpt_path):
+        """
+        Inspect a checkpoint file without loading it into a model.
+        Useful for checking architecture before creating an agent.
+        
+        Args:
+            ckpt_path: Path to checkpoint file
+            
+        Returns:
+            dict: Architecture info if available, None otherwise
+        """
+        import os
+        
+        if not os.path.exists(ckpt_path):
+            print(f"Checkpoint not found: {ckpt_path}")
+            return None
+        
+        try:
+            checkpoint = torch.load(ckpt_path, weights_only=False, map_location='cpu')
+            
+            if 'architecture' in checkpoint:
+                arch = checkpoint['architecture']
+                print(f"\n{'='*60}")
+                print(f"CHECKPOINT ARCHITECTURE INFO: {ckpt_path}")
+                print(f"{'='*60}")
+                print(f"  hidden_dim:    {arch.get('hidden_dim', 'N/A')}")
+                print(f"  policy_type:   {arch.get('policy_type', 'N/A')}")
+                print(f"  state_dim:     {arch.get('state_dim', 'N/A')}")
+                print(f"  action_dim:    {arch.get('action_dim', 'N/A')}")
+                print(f"  num_producers: {arch.get('num_producers', 'N/A')}")
+                print(f"  num_injectors: {arch.get('num_injectors', 'N/A')}")
+                print(f"{'='*60}\n")
+                return arch
+            else:
+                # Try to infer from state dict
+                print(f"\n{'='*60}")
+                print(f"CHECKPOINT INFO (Legacy Format): {ckpt_path}")
+                print(f"{'='*60}")
+                
+                policy_state = checkpoint.get('policy_state_dict', {})
+                if 'linear1.weight' in policy_state:
+                    weight_shape = policy_state['linear1.weight'].shape
+                    print(f"  Inferred hidden_dim: {weight_shape[0]}")
+                    print(f"  Inferred state_dim:  {weight_shape[1]}")
+                
+                # Check policy type by looking at layer names
+                if 'mean_bhp.weight' in policy_state:
+                    print(f"  Inferred policy_type: deterministic")
+                elif 'mean_linear.weight' in policy_state:
+                    print(f"  Inferred policy_type: gaussian")
+                else:
+                    print(f"  Could not determine policy_type")
+                
+                print(f"{'='*60}\n")
+                return None
+                
+        except Exception as e:
+            print(f"Error inspecting checkpoint: {e}")
+            return None
 
     def update_policy_with_dashboard_config(self, rl_config):
         """

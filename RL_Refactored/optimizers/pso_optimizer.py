@@ -65,7 +65,8 @@ class PSOOptimizer(BaseOptimizer):
         # Stopping criteria
         n_stagnation: int = 20,  # Stop after N iterations without improvement
         seed: Optional[int] = None,
-        verbose: int = 1
+        verbose: int = 1,
+        init_strategy: str = 'midpoint'
     ):
         """
         Initialize PSO optimizer.
@@ -92,8 +93,9 @@ class PSOOptimizer(BaseOptimizer):
                 
             seed: Random seed for reproducibility
             verbose: Verbosity level (0=silent, 1=summary)
+            init_strategy: Initialization strategy ('midpoint', 'random', 'naive_zero', etc.)
         """
-        super().__init__(rom_model, config, norm_params, device, action_ranges)
+        super().__init__(rom_model, config, norm_params, device, action_ranges, init_strategy)
         
         self.max_iterations = max_iterations
         self.tolerance = tolerance
@@ -240,11 +242,11 @@ class PSOOptimizer(BaseOptimizer):
         print(f"  Gas Injection: [{self.action_ranges['gas_injection']['min']:.0f}, {self.action_ranges['gas_injection']['max']:.0f}] ft³/day")
         print(f"{'='*60}\n")
         
-        # Evaluate initial objective
-        x0 = self.generate_initial_guess(num_steps, strategy='midpoint')
+        # Evaluate initial objective using configured strategy
+        x0 = self.generate_initial_guess(num_steps, strategy=self.init_strategy)
         z0_first = self.z0_ensemble[0:1]
         initial_obj, _ = self.evaluate_objective(x0.reshape(num_steps, self.num_controls), z0_first)
-        print(f"Initial objective (midpoint): {initial_obj:.6f}")
+        print(f"Initial objective ({self.init_strategy}): {initial_obj:.6f}")
         
         # Run PSO
         if PYSWARMS_AVAILABLE:

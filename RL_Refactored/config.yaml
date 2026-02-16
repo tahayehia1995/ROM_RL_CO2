@@ -159,7 +159,7 @@ rl_model:
   # ===== NEURAL NETWORK ARCHITECTURE =====
   networks:
     # Hidden layer dimensions for all networks
-    hidden_dim: 200                     # Hidden layer size for Q-networks and policy networks
+    hidden_dim: 192                     # Hidden layer size for Q-networks and policy networks (must match checkpoint)
     
     # Neural network initialization
     initialization:
@@ -173,7 +173,7 @@ rl_model:
       
     # Policy network architecture (actor)
     policy:
-      type: 'gaussian'                  # Gaussian policy for exploration
+      type: 'gaussian'                  # Policy type: 'deterministic' or 'gaussian' (must match checkpoint)
       output_activation: 'sigmoid'      # Output activation to ensure [0,1] range
       
   # ===== SAC ALGORITHM HYPERPARAMETERS =====

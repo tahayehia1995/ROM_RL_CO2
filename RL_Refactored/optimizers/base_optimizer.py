@@ -105,7 +105,8 @@ class BaseOptimizer(ABC):
         config,
         norm_params: Dict,
         device: torch.device,
-        action_ranges: Optional[Dict] = None
+        action_ranges: Optional[Dict] = None,
+        init_strategy: str = 'midpoint'
     ):
         """
         Initialize base optimizer.
@@ -116,11 +117,13 @@ class BaseOptimizer(ABC):
             norm_params: Normalization parameters dictionary
             device: PyTorch device (cuda/cpu)
             action_ranges: Optional action range constraints
+            init_strategy: Initialization strategy ('midpoint', 'random', 'naive_zero', etc.)
         """
         self.rom = rom_model
         self.config = config
         self.norm_params = norm_params
         self.device = device
+        self.init_strategy = init_strategy
         
         # Extract well configuration
         self.num_prod = config.data.get('num_prod', 3)
@@ -151,6 +154,7 @@ class BaseOptimizer(ABC):
         print(f"      BHP: [{self.bhp_norm_min:.2f}, {self.bhp_norm_max:.2f}] psi")
         print(f"      GASRATSC: [{self.gas_norm_min:.0f}, {self.gas_norm_max:.0f}] ft³/day")
         print(f"   Norm Params Keys: {list(self.norm_params.keys())}")
+        print(f"   Init Strategy: {init_strategy}")
         
         # Time step for ROM integration
         self.dt = torch.tensor([[1.0]], device=device)
@@ -556,13 +560,31 @@ class BaseOptimizer(ABC):
         
         return controls_normalized
     
+    # Available initialization strategies
+    INIT_STRATEGIES = {
+        'midpoint': 'Midpoint (0.5) - Center of control range',
+        'random': 'Random - Uniform random in [0,1]',
+        'low': 'Low (0.1) - 10% of range',
+        'naive_zero': 'Naive Zero - Minimum controls (0.0)',
+        'naive_max': 'Naive Max - Maximum controls (1.0)',
+        'naive_low_bhp_high_gas': 'Naive Low BHP + High Gas - Minimize BHP, maximize injection',
+        'naive_high_bhp_low_gas': 'Naive High BHP + Low Gas - Maximize BHP, minimize injection'
+    }
+    
     def generate_initial_guess(self, num_steps: int, strategy: str = 'midpoint') -> np.ndarray:
         """
         Generate initial control guess in NORMALIZED [0,1] space.
         
         Args:
             num_steps: Number of control timesteps
-            strategy: 'midpoint' (0.5), 'random', or 'low' (0.1)
+            strategy: Initialization strategy:
+                - 'midpoint': 0.5 for all (center of range)
+                - 'random': Uniform random in [0,1]
+                - 'low': 0.1 for all (10% of range)
+                - 'naive_zero': 0.0 for all (minimum controls)
+                - 'naive_max': 1.0 for all (maximum controls)
+                - 'naive_low_bhp_high_gas': Low BHP (0.1), High gas (0.9)
+                - 'naive_high_bhp_low_gas': High BHP (0.9), Low gas (0.1)
             
         Returns:
             Initial control array in [0,1], shape (num_steps * num_controls,)
@@ -575,8 +597,26 @@ class BaseOptimizer(ABC):
             initial = np.random.uniform(0, 1, n_vars)
         elif strategy == 'low':
             initial = np.full(n_vars, 0.1)  # 10% of range
+        elif strategy == 'naive_zero':
+            initial = np.full(n_vars, 0.0)  # Minimum controls
+        elif strategy == 'naive_max':
+            initial = np.full(n_vars, 1.0)  # Maximum controls
+        elif strategy == 'naive_low_bhp_high_gas':
+            # Low BHP (minimize pressure), High gas injection (maximize storage)
+            initial = np.zeros(n_vars)
+            for t in range(num_steps):
+                base = t * self.num_controls
+                initial[base:base + self.num_prod] = 0.1  # Low BHP (10%)
+                initial[base + self.num_prod:base + self.num_controls] = 0.9  # High gas (90%)
+        elif strategy == 'naive_high_bhp_low_gas':
+            # High BHP, Low gas injection
+            initial = np.zeros(n_vars)
+            for t in range(num_steps):
+                base = t * self.num_controls
+                initial[base:base + self.num_prod] = 0.9  # High BHP (90%)
+                initial[base + self.num_prod:base + self.num_controls] = 0.1  # Low gas (10%)
         else:
-            initial = np.full(n_vars, 0.5)
+            initial = np.full(n_vars, 0.5)  # Default to midpoint
         
         return initial
     

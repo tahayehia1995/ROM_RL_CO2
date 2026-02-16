@@ -3,6 +3,8 @@ RL Visualization Dashboard
 Full implementation for RL training results visualization
 """
 import sys
+import os
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -252,11 +254,185 @@ class ScientificVisualization:
         # Layout with episode selector and info header
         header = widgets.HBox([episode_selector, episode_info])
         
+        # ── CSV Export Section ──
+        csv_output_dir = widgets.Text(
+            value='csv_exports/',
+            placeholder='Output directory for CSV files',
+            description='CSV Output Dir:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='500px')
+        )
+        
+        save_actions_obs_btn = widgets.Button(
+            description='📄 Save Actions & Observations',
+            button_style='info', icon='file-text',
+            layout=widgets.Layout(width='250px')
+        )
+        save_economics_btn = widgets.Button(
+            description='💰 Save Economics / NCF',
+            button_style='info', icon='file-text',
+            layout=widgets.Layout(width='250px')
+        )
+        csv_status = widgets.Label(value='Ready to export')
+        csv_output_area = widgets.Output()
+        
+        def _on_save_actions_obs(btn):
+            self._export_actions_obs_csv(csv_output_dir.value, csv_status, csv_output_area)
+        def _on_save_economics(btn):
+            self._export_economics_csv(csv_output_dir.value, csv_status, csv_output_area)
+        
+        save_actions_obs_btn.on_click(_on_save_actions_obs)
+        save_economics_btn.on_click(_on_save_economics)
+        
+        csv_export_section = widgets.VBox([
+            widgets.HTML("<h4>📄 Export Episode to CSV</h4>"),
+            widgets.HTML("<p><i>Export the currently selected episode's data to CSV files for visualization.</i></p>"),
+            csv_output_dir,
+            widgets.HBox([save_actions_obs_btn, save_economics_btn, csv_status]),
+            csv_output_area
+        ])
+        
         return widgets.VBox([
             widgets.HTML("<h3>🔬 Enhanced RL Results Dashboard</h3>"),
             header,
+            widgets.HTML("<hr>"),
+            csv_export_section,
+            widgets.HTML("<hr>"),
             main_tabs
         ])
+    
+    def _export_actions_obs_csv(self, output_dir, status_label, output_area):
+        """Export current episode's actions and observations to CSV."""
+        status_label.value = '📄 Saving...'
+        with output_area:
+            clear_output(wait=True)
+            try:
+                output_dir = output_dir.strip()
+                os.makedirs(output_dir, exist_ok=True)
+                
+                actions = self._get_denormalized_actions()
+                observations = self._get_denormalized_observations()
+                
+                if not actions and not observations:
+                    print("❌ No actions/observations data for this episode.")
+                    status_label.value = '❌ No data'
+                    return
+                
+                num_steps = max(len(actions), len(observations))
+                start_year = 2025
+                
+                # Determine column keys from the first non-empty dict
+                action_keys = list(actions[0].keys()) if actions and actions[0] else []
+                obs_keys = list(observations[0].keys()) if observations and observations[0] else []
+                
+                header = ['Year'] + action_keys + obs_keys
+                
+                filename = f"episode_{self.current_episode}_actions_observations.csv"
+                filepath = os.path.join(output_dir, filename)
+                
+                with open(filepath, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    for t in range(num_steps):
+                        year = start_year + t
+                        row = [year]
+                        act = actions[t] if t < len(actions) else {}
+                        obs = observations[t] if t < len(observations) else {}
+                        row += [act.get(k, '') for k in action_keys]
+                        row += [obs.get(k, '') for k in obs_keys]
+                        writer.writerow(row)
+                
+                size_kb = os.path.getsize(filepath) / 1024
+                print(f"✅ Saved {filename} ({num_steps} rows, {size_kb:.1f} KB)")
+                status_label.value = f'✅ Saved {filename}'
+                
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                import traceback; traceback.print_exc()
+                status_label.value = f'❌ Error: {e}'
+    
+    def _export_economics_csv(self, output_dir, status_label, output_area):
+        """Export current episode's economics / NCF data to CSV."""
+        status_label.value = '💰 Saving...'
+        with output_area:
+            clear_output(wait=True)
+            try:
+                output_dir = output_dir.strip()
+                os.makedirs(output_dir, exist_ok=True)
+                
+                if self.data is None:
+                    print("❌ No episode data available.")
+                    status_label.value = '❌ No data'
+                    return
+                
+                economic_breakdown = self.data.get('economic_breakdown', [])
+                if not economic_breakdown:
+                    print("❌ No economic breakdown data for this episode.")
+                    status_label.value = '❌ No economics data'
+                    return
+                
+                # Get pre-project parameters
+                try:
+                    years_before = self.config.rl_model.get('economics', {}).get('years_before_project_start', 5)
+                    cost_per_year = self.config.rl_model.get('economics', {}).get('capital_cost_per_year', 100000000.0)
+                    scale_factor = self.config.rl_model.get('economics', {}).get('scale_factor', 1000000.0)
+                except:
+                    years_before = 5
+                    cost_per_year = 100000000.0
+                    scale_factor = 1000000.0
+                
+                # Extract per-step operational cashflows
+                if economic_breakdown and 'operational_cashflow' in economic_breakdown[0]:
+                    op_cashflows = [bd.get('operational_cashflow', 0) for bd in economic_breakdown]
+                else:
+                    op_cashflows = [bd.get('net_step_cashflow', 0) for bd in economic_breakdown]
+                
+                # Per-step component breakdown
+                gas_rev = [bd.get('gas_injection_revenue', 0) for bd in economic_breakdown]
+                gas_cost = [bd.get('gas_injection_cost', 0) for bd in economic_breakdown]
+                water_pen = [bd.get('water_production_penalty', 0) for bd in economic_breakdown]
+                gas_pen = [bd.get('gas_production_penalty', 0) for bd in economic_breakdown]
+                
+                # Build full timeline: pre-project + operational
+                header = ['Year', 'Phase', 'Gas_Injection_Revenue', 'Gas_Injection_Cost',
+                          'Water_Production_Penalty', 'Gas_Production_Penalty',
+                          'Net_Cashflow', 'Cumulative_Cashflow']
+                
+                rows = []
+                cumulative = 0.0
+                
+                # Pre-project years (capital cost phase)
+                for y in range(years_before):
+                    annual_cf = -cost_per_year / scale_factor
+                    cumulative += annual_cf
+                    rows.append([y, 'Pre-Project', 0, 0, 0, 0, annual_cf, cumulative])
+                
+                # Operational years
+                for t, cf in enumerate(op_cashflows):
+                    cumulative += cf
+                    rows.append([years_before + t, 'Operational',
+                                 gas_rev[t] if t < len(gas_rev) else 0,
+                                 gas_cost[t] if t < len(gas_cost) else 0,
+                                 water_pen[t] if t < len(water_pen) else 0,
+                                 gas_pen[t] if t < len(gas_pen) else 0,
+                                 cf, cumulative])
+                
+                filename = f"episode_{self.current_episode}_economics.csv"
+                filepath = os.path.join(output_dir, filename)
+                
+                with open(filepath, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    writer.writerows(rows)
+                
+                size_kb = os.path.getsize(filepath) / 1024
+                print(f"✅ Saved {filename} ({len(rows)} rows, {size_kb:.1f} KB)")
+                status_label.value = f'✅ Saved {filename}'
+                
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                import traceback; traceback.print_exc()
+                status_label.value = f'❌ Error: {e}'
     
     def _create_training_performance_tab(self):
         """Create RL training performance analysis tab with metrics visualization"""

@@ -66,7 +66,8 @@ class ScipyOptimizer(BaseOptimizer):
         # Common parameters
         seed: Optional[int] = None,
         workers: int = 1,
-        disp: bool = True
+        disp: bool = True,
+        init_strategy: str = 'midpoint'
     ):
         """
         Initialize Scipy global optimizer.
@@ -102,8 +103,9 @@ class ScipyOptimizer(BaseOptimizer):
                 seed: Random seed for reproducibility
                 workers: Number of parallel workers (DE only)
                 disp: Display progress
+                init_strategy: Initialization strategy ('midpoint', 'random', 'naive_zero', etc.)
         """
-        super().__init__(rom_model, config, norm_params, device, action_ranges)
+        super().__init__(rom_model, config, norm_params, device, action_ranges, init_strategy)
         
         if method not in self.SUPPORTED_METHODS:
             raise ValueError(f"Method '{method}' not supported. Use one of: {self.SUPPORTED_METHODS}")
@@ -270,8 +272,8 @@ class ScipyOptimizer(BaseOptimizer):
         # Get bounds (all in [0, 1])
         bounds_list = self.get_bounds(num_steps)
         
-        # Evaluate initial objective (at midpoint)
-        x0 = self.generate_initial_guess(num_steps, strategy='midpoint')
+        # Evaluate initial objective using configured strategy
+        x0 = self.generate_initial_guess(num_steps, strategy=self.init_strategy)
         z0_first = self.z0_ensemble[0:1]
         initial_obj, _ = self.evaluate_objective(x0.reshape(num_steps, self.num_controls), z0_first)
         print(f"Initial objective (midpoint): {initial_obj:.6f}")

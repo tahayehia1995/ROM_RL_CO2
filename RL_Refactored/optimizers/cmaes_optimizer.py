@@ -66,7 +66,8 @@ class CMAESOptimizer(BaseOptimizer):
         tolfun: float = 1e-11,
         tolfunhist: float = 1e-12,
         # Display
-        verbose: int = 1
+        verbose: int = 1,
+        init_strategy: str = 'midpoint'
     ):
         """
         Initialize CMA-ES optimizer.
@@ -92,8 +93,9 @@ class CMAESOptimizer(BaseOptimizer):
                 tolfunhist: Tolerance on function history
             
             verbose: Verbosity level (0=silent, 1=summary, 3=full)
+            init_strategy: Initialization strategy ('midpoint', 'random', 'naive_zero', etc.)
         """
-        super().__init__(rom_model, config, norm_params, device, action_ranges)
+        super().__init__(rom_model, config, norm_params, device, action_ranges, init_strategy)
         
         if not CMA_AVAILABLE:
             raise ImportError(
@@ -239,8 +241,8 @@ class CMAESOptimizer(BaseOptimizer):
         print(f"  Gas Injection: [{self.action_ranges['gas_injection']['min']:.0f}, {self.action_ranges['gas_injection']['max']:.0f}] ft³/day")
         print(f"{'='*60}\n")
         
-        # Initial guess (midpoint of [0,1])
-        x0 = self.generate_initial_guess(num_steps, strategy='midpoint')
+        # Initial guess using configured strategy
+        x0 = self.generate_initial_guess(num_steps, strategy=self.init_strategy)
         
         # Evaluate initial objective
         z0_first = self.z0_ensemble[0:1]

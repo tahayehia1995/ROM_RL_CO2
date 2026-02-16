@@ -84,6 +84,7 @@ def create_optimizer(config):
     optimizer_params = config.get('optimizer_params', {})
     stosag_params = config.get('stosag_params', {})
     sqp_params = config.get('sqp_params', {})
+    init_strategy = config.get('init_strategy', 'midpoint')
     
     # Common arguments for all optimizers
     common_args = {
@@ -91,7 +92,8 @@ def create_optimizer(config):
         'config': config['config'],
         'norm_params': config['norm_params'],
         'device': config['device'],
-        'action_ranges': action_ranges
+        'action_ranges': action_ranges,
+        'init_strategy': init_strategy
     }
     
     if optimizer_type == 'LS-SQP-StoSAG':

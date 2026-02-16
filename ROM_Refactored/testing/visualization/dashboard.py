@@ -332,6 +332,34 @@ class InteractiveVisualizationDashboard:
         
         self.save_status_label = widgets.Label(value='Ready to save predictions')
         
+        # CSV export controls - save a single case to CSV for visualization
+        self.csv_case_dropdown = widgets.Dropdown(
+            options=[(f"Test Case {i} (Sim #{self.test_case_indices[i]})", i) 
+                     for i in range(self.num_case)],
+            value=0,
+            description='Select Case:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='400px')
+        )
+        
+        self.csv_output_dir_text = widgets.Text(
+            value=os.path.join(default_data_dir, 'csv_exports/'),
+            placeholder='Enter output directory for CSV files',
+            description='CSV Output Dir:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='600px')
+        )
+        
+        self.save_csv_button = widgets.Button(
+            description='📄 Save Case CSV',
+            button_style='info',
+            icon='file-text',
+            layout=widgets.Layout(width='200px')
+        )
+        
+        self.csv_status_label = widgets.Label(value='Ready to export case CSV')
+        self.csv_output = widgets.Output()
+        
         # Tab selection
         self.tab_widget = widgets.Tab()
         
@@ -417,6 +445,7 @@ class InteractiveVisualizationDashboard:
         """Set up event handlers for all widgets"""
         self.load_mask_button.on_click(self._load_mask_file)
         self.save_predictions_button.on_click(self._save_predictions)
+        self.save_csv_button.on_click(self._save_case_csv)
         
         # Masking checkbox handler
         self.use_masking_checkbox.observe(self._on_masking_toggle, names='value')
@@ -1021,6 +1050,132 @@ class InteractiveVisualizationDashboard:
                 traceback.print_exc()
                 self.save_status_label.value = f'❌ Error: {str(e)}'
         
+    def _save_case_csv(self, button):
+        """Save a single simulation case's predictions to CSV files for visualization.
+        
+        Produces two CSV files:
+        1. Timeseries CSV: rows=timesteps, columns=well observations (BHP, Gas, Water per well)
+        2. Spatial CSV: rows=(timestep, i, j, k), columns=channel predictions
+        Both files contain denormalized predicted values.
+        """
+        import csv
+        
+        self.csv_status_label.value = '📄 Saving CSV...'
+        with self.csv_output:
+            clear_output(wait=True)
+            
+            try:
+                # Get selected case and output directory
+                case_idx = self.csv_case_dropdown.value
+                actual_case_id = self.test_case_indices[case_idx]
+                output_dir = self.csv_output_dir_text.value.strip()
+                if not output_dir.endswith('/') and not output_dir.endswith('\\'):
+                    output_dir += '/'
+                os.makedirs(output_dir, exist_ok=True)
+                
+                print(f"📄 Exporting Case {case_idx} (Simulation #{actual_case_id}) to CSV...")
+                
+                saved_files = []
+                years = self.all_years  # e.g. [2025, 2026, ..., 2054]
+                
+                # ── 1. Timeseries (wells) CSV ──────────────────────────────
+                print(f"\n📈 Saving timeseries (wells) predictions...")
+                
+                ts_filename = f"case_{actual_case_id}_timeseries.csv"
+                ts_path = os.path.join(output_dir, ts_filename)
+                
+                # Build header
+                ts_header = ['Year']
+                for name in self.obs_names:
+                    ts_header.append(name)
+                
+                # Extract observation data for this case
+                yobs_pred_case = self.yobs_pred[case_idx].cpu().detach().numpy()   # (num_tstep, 9)
+                
+                with open(ts_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(ts_header)
+                    
+                    for t in range(self.num_tstep):
+                        row = [years[t]]
+                        for obs_idx in range(9):
+                            pred_val = float(self._denormalize_obs_data(
+                                yobs_pred_case[t, obs_idx], obs_idx))
+                            row.append(pred_val)
+                        writer.writerow(row)
+                
+                saved_files.append(ts_filename)
+                print(f"  ✅ Saved {ts_filename}  ({self.num_tstep} timesteps × {len(self.obs_names)} wells)")
+                
+                # ── 2. Spatial (channels) CSV ──────────────────────────────
+                print(f"\n🗺️  Saving spatial (channels) predictions...")
+                
+                sp_filename = f"case_{actual_case_id}_spatial.csv"
+                sp_path = os.path.join(output_dir, sp_filename)
+                
+                # Build header: Year, i, j, k, channel1, channel2, ...
+                sp_header = ['Year', 'i', 'j', 'k']
+                for ch_name in self.channel_names:
+                    sp_header.append(ch_name)
+                
+                n_channels = len(self.channel_names)
+                total_rows = self.num_tstep * self.Nx * self.Ny * self.Nz
+                print(f"  Grid: {self.Nx}×{self.Ny}×{self.Nz} = {self.Nx*self.Ny*self.Nz} cells × {self.num_tstep} timesteps = {total_rows} rows")
+                
+                # Pre-extract and denormalize all channel data for this case
+                pred_channels = []   # list of (num_tstep, Nx, Ny, Nz) arrays
+                
+                for ch_idx, ch_name in enumerate(self.channel_names):
+                    field_key = self.field_keys[ch_idx]
+                    
+                    # Predicted: state_pred shape (num_case, num_tstep, n_channels, Nx, Ny, Nz)
+                    pred_raw = self.state_pred[case_idx, :, ch_idx, :, :, :].cpu().detach().numpy()
+                    
+                    # Denormalize each timestep
+                    pred_denorm = np.zeros_like(pred_raw)
+                    for t in range(self.num_tstep):
+                        pred_denorm[t] = self._denormalize_field_data(pred_raw[t], field_key)
+                    
+                    pred_channels.append(pred_denorm)
+                
+                # Write spatial CSV
+                with open(sp_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(sp_header)
+                    
+                    for t in range(self.num_tstep):
+                        year = years[t]
+                        for ix in range(self.Nx):
+                            for iy in range(self.Ny):
+                                for iz in range(self.Nz):
+                                    row = [year, ix, iy, iz]
+                                    for ch_idx in range(n_channels):
+                                        row.append(float(pred_channels[ch_idx][t, ix, iy, iz]))
+                                    writer.writerow(row)
+                        
+                        # Progress update every 10 timesteps
+                        if (t + 1) % 10 == 0 or t == self.num_tstep - 1:
+                            print(f"    Timestep {t+1}/{self.num_tstep} written...")
+                
+                saved_files.append(sp_filename)
+                print(f"  ✅ Saved {sp_filename}  ({total_rows} rows × {len(sp_header)} columns)")
+                
+                # ── Summary ────────────────────────────────────────────────
+                print(f"\n✅ Successfully exported Case {case_idx} (Simulation #{actual_case_id})")
+                print(f"📋 Saved files in {output_dir}:")
+                for fname in saved_files:
+                    fpath = os.path.join(output_dir, fname)
+                    size_mb = os.path.getsize(fpath) / (1024 * 1024)
+                    print(f"   • {fname}  ({size_mb:.1f} MB)")
+                
+                self.csv_status_label.value = f'✅ Exported case #{actual_case_id} ({len(saved_files)} files)'
+                
+            except Exception as e:
+                print(f"❌ Error exporting CSV: {e}")
+                import traceback
+                traceback.print_exc()
+                self.csv_status_label.value = f'❌ Error: {str(e)}'
+    
     def _update_spatial_plot(self, change=None):
         """Update spatial visualization plot with high-quality styling (matching interactive_h5_visualizer.py)"""
         with self.spatial_output:
@@ -3666,6 +3821,16 @@ class InteractiveVisualizationDashboard:
             self.save_output
         ])
         
+        # CSV export section - single case export for visualization
+        csv_export_section = widgets.VBox([
+            widgets.HTML("<h3>📄 Export Case to CSV</h3>"),
+            widgets.HTML("<p><i>Export a single simulation case to CSV files (timeseries + spatial) with denormalized predicted values for visualization.</i></p>"),
+            self.csv_case_dropdown,
+            self.csv_output_dir_text,
+            widgets.HBox([self.save_csv_button, self.csv_status_label]),
+            self.csv_output
+        ])
+        
         # Spatial visualization tab
         spatial_controls = widgets.VBox([
             widgets.HTML("<h4>🎯 Spatial Field Controls</h4>"),
@@ -3719,6 +3884,8 @@ class InteractiveVisualizationDashboard:
             masking_section,
             widgets.HTML("<hr>"),
             save_section,
+            widgets.HTML("<hr>"),
+            csv_export_section,
             widgets.HTML("<hr>"),
             self.tab_widget
         ])

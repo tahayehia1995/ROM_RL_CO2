@@ -13,6 +13,8 @@ Provides visualizations for:
 5. Economic Summary
 """
 
+import os
+import csv
 import numpy as np
 import torch
 from pathlib import Path
@@ -111,8 +113,40 @@ class OptimizerResultsDashboard:
         tabs.set_title(3, '🗺️ Spatial')
         tabs.set_title(4, '💰 Economics')
         
+        # CSV export section
+        self.opt_csv_dir = widgets.Text(
+            value='csv_exports/',
+            placeholder='Output directory for CSV files',
+            description='CSV Output Dir:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='500px')
+        )
+        opt_save_actions_btn = widgets.Button(
+            description='📄 Save Controls & Observations',
+            button_style='info', icon='file-text',
+            layout=widgets.Layout(width='260px')
+        )
+        opt_save_econ_btn = widgets.Button(
+            description='💰 Save Economics / NCF',
+            button_style='info', icon='file-text',
+            layout=widgets.Layout(width='250px')
+        )
+        self.opt_csv_status = widgets.Label(value='Ready to export')
+        self.opt_csv_output = widgets.Output()
+        
+        opt_save_actions_btn.on_click(self._on_save_controls_obs_csv)
+        opt_save_econ_btn.on_click(self._on_save_economics_csv)
+        
+        csv_section = widgets.VBox([
+            widgets.HTML("<h4>📄 Export Results to CSV</h4>"),
+            widgets.HTML("<p><i>Export optimal controls, observations, and economics to CSV for visualization.</i></p>"),
+            self.opt_csv_dir,
+            widgets.HBox([opt_save_actions_btn, opt_save_econ_btn, self.opt_csv_status]),
+            self.opt_csv_output
+        ])
+        
         # Assemble dashboard
-        self.dashboard = widgets.VBox([header, tabs])
+        self.dashboard = widgets.VBox([header, csv_section, widgets.HTML("<hr>"), tabs])
         
         # Populate tabs
         self._populate_performance_tab()
@@ -881,6 +915,141 @@ OPTIMIZATION RESULTS:
             widgets.HTML("<h3>💰 Economic Analysis</h3>"),
             output
         ]
+    
+    def _on_save_controls_obs_csv(self, button):
+        """Export optimal controls and observations to CSV."""
+        self.opt_csv_status.value = '📄 Saving...'
+        with self.opt_csv_output:
+            clear_output(wait=True)
+            try:
+                output_dir = self.opt_csv_dir.value.strip()
+                os.makedirs(output_dir, exist_ok=True)
+                
+                controls = self.result.optimal_controls  # (num_steps, num_controls)
+                obs = self.result.optimal_observations
+                if obs is not None and obs.ndim == 3:
+                    # Squeeze only if axis 1 has size 1: (num_steps, 1, 9) -> (num_steps, 9)
+                    if obs.shape[1] == 1:
+                        obs = obs.squeeze(1)
+                    elif obs.shape[0] == 1:
+                        obs = obs.squeeze(0)
+                    else:
+                        # Reshape (num_steps, num_realizations, 9) -> take mean across realizations
+                        obs = obs.mean(axis=1)
+                
+                # Build header
+                header = ['Year']
+                for p in range(self.num_prod):
+                    header.append(f'P{p+1}_BHP_psi')
+                for i in range(self.num_inj):
+                    header.append(f'I{i+1}_Gas_ft3day')
+                
+                if obs is not None:
+                    for i in range(self.num_inj):
+                        header.append(f'I{i+1}_BHP_psi')
+                    for p in range(self.num_prod):
+                        header.append(f'P{p+1}_Gas_ft3day')
+                    for p in range(self.num_prod):
+                        header.append(f'P{p+1}_Water_ft3day')
+                
+                filename = f"optimizer_{self.result.optimizer_type}_controls_observations.csv"
+                filepath = os.path.join(output_dir, filename)
+                
+                with open(filepath, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    for t in range(self.num_steps):
+                        year = 2025 + t
+                        row = [year]
+                        # Controls: producer BHP then injector gas
+                        for c in range(controls.shape[1]):
+                            row.append(float(controls[t, c]))
+                        # Observations
+                        if obs is not None and t < obs.shape[0]:
+                            for o in range(obs.shape[1]):
+                                row.append(float(obs[t, o]))
+                        writer.writerow(row)
+                
+                size_kb = os.path.getsize(filepath) / 1024
+                print(f"✅ Saved {filename} ({self.num_steps} rows, {size_kb:.1f} KB)")
+                self.opt_csv_status.value = f'✅ Saved {filename}'
+                
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                import traceback; traceback.print_exc()
+                self.opt_csv_status.value = f'❌ Error: {e}'
+    
+    def _on_save_economics_csv(self, button):
+        """Export economics / NCF data to CSV."""
+        self.opt_csv_status.value = '💰 Saving...'
+        with self.opt_csv_output:
+            clear_output(wait=True)
+            try:
+                output_dir = self.opt_csv_dir.value.strip()
+                os.makedirs(output_dir, exist_ok=True)
+                
+                breakdown = self.result.economic_breakdown or {}
+                if not breakdown:
+                    print("❌ No economic breakdown data available.")
+                    self.opt_csv_status.value = '❌ No economics data'
+                    return
+                
+                # Economic parameters
+                years_before = 5
+                capital_cost_per_year = 100000000.0
+                scale_factor = 1000000.0
+                if self.config and hasattr(self.config, 'rl_model'):
+                    econ = self.config.rl_model.get('economics', {})
+                    years_before = econ.get('years_before_project_start', 5)
+                    capital_cost_per_year = econ.get('capital_cost_per_year', 100000000.0)
+                    scale_factor = econ.get('scale_factor', 1000000.0)
+                
+                step_npvs = breakdown.get('step_npvs', [])
+                gas_rev_total = breakdown.get('gas_injection_revenue', 0)
+                water_pen_total = breakdown.get('water_production_penalty', 0)
+                gas_pen_total = breakdown.get('gas_production_penalty', 0)
+                
+                header = ['Year', 'Phase', 'Net_Cashflow_Annual',
+                          'Cumulative_Cashflow']
+                
+                rows = []
+                cumulative = 0.0
+                
+                # Pre-project capital years
+                for y in range(years_before):
+                    annual_cf = -capital_cost_per_year / scale_factor
+                    cumulative += annual_cf
+                    rows.append([y, 'Pre-Project', annual_cf, cumulative])
+                
+                # Operational years
+                if step_npvs:
+                    for t, daily_npv in enumerate(step_npvs):
+                        annual_cf = daily_npv * 365
+                        cumulative += annual_cf
+                        rows.append([years_before + t, 'Operational', annual_cf, cumulative])
+                
+                filename = f"optimizer_{self.result.optimizer_type}_economics.csv"
+                filepath = os.path.join(output_dir, filename)
+                
+                with open(filepath, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    writer.writerows(rows)
+                
+                size_kb = os.path.getsize(filepath) / 1024
+                print(f"✅ Saved {filename} ({len(rows)} rows, {size_kb:.1f} KB)")
+                
+                # Also print summary
+                print(f"   Gas Injection Revenue (total): {gas_rev_total:.4f}")
+                print(f"   Water Production Penalty (total): {water_pen_total:.4f}")
+                print(f"   Gas Production Penalty (total): {gas_pen_total:.4f}")
+                
+                self.opt_csv_status.value = f'✅ Saved {filename}'
+                
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                import traceback; traceback.print_exc()
+                self.opt_csv_status.value = f'❌ Error: {e}'
     
     def display(self):
         """Display the dashboard."""

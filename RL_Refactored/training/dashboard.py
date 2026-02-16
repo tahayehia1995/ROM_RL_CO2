@@ -126,6 +126,54 @@ class RLTrainingDashboard:
             layout=widgets.Layout(width='100%', margin='10px')
         )
         
+        # === Evaluation-Based Checkpoint Selection Options ===
+        self.eval_checkpoint_checkbox = widgets.Checkbox(
+            value=False,
+            description='Evaluation-Based Checkpoint Selection',
+            indent=False,
+            layout=widgets.Layout(width='auto', margin='5px 10px'),
+            style={'description_width': 'initial'}
+        )
+        self.eval_checkpoint_checkbox.observe(self._on_eval_checkpoint_toggle, names='value')
+        
+        self.eval_interval_spinner = widgets.BoundedIntText(
+            value=5,
+            min=1,
+            max=50,
+            step=1,
+            description='Eval every N episodes:',
+            layout=widgets.Layout(width='250px', margin='2px 10px'),
+            style={'description_width': 'initial'},
+            disabled=True
+        )
+        
+        self.eval_num_cases_spinner = widgets.BoundedIntText(
+            value=10,
+            min=1,
+            max=100,
+            step=1,
+            description='Eval Z0 cases:',
+            layout=widgets.Layout(width='250px', margin='2px 10px'),
+            style={'description_width': 'initial'},
+            disabled=True
+        )
+        
+        self.eval_info_label = widgets.HTML(
+            value=(
+                "<p style='font-size:11px; color:#666; margin:2px 10px;'>"
+                "When enabled, checkpoints are saved based on <b>deterministic</b> policy "
+                "evaluation (no exploration noise), giving a true measure of policy quality.</p>"
+            )
+        )
+        
+        eval_options_box = widgets.VBox([
+            widgets.HTML("<hr style='margin:5px 0'>"),
+            widgets.HTML("<b style='margin-left:10px'>Checkpoint Strategy</b>"),
+            self.eval_checkpoint_checkbox,
+            widgets.HBox([self.eval_interval_spinner, self.eval_num_cases_spinner]),
+            self.eval_info_label
+        ])
+        
         # Main widget
         self.main_widget = widgets.VBox([
             widgets.HTML("<h3>🚀 RL Training Dashboard</h3>"),
@@ -133,8 +181,68 @@ class RLTrainingDashboard:
             widgets.HBox([self.start_button, self.stop_button]),
             self.training_info,
             self.progress_bar,
+            eval_options_box,
             self.status_output
         ])
+    
+    def _on_eval_checkpoint_toggle(self, change):
+        """Enable/disable evaluation checkpoint sub-options"""
+        enabled = change['new']
+        self.eval_interval_spinner.disabled = not enabled
+        self.eval_num_cases_spinner.disabled = not enabled
+    
+    def _run_deterministic_evaluation(self, z0_options, num_cases=10):
+        """
+        Run a lightweight deterministic evaluation of the current policy.
+        
+        Uses the raw policy output (no ActionVariationManager noise) to measure
+        the true policy quality for checkpoint selection.
+        
+        Args:
+            z0_options: Tensor of available Z0 initial states (num_available, latent_dim)
+            num_cases: Number of Z0 cases to evaluate
+            
+        Returns:
+            mean_eval_npv: Mean NPV across evaluated cases
+        """
+        max_steps = self.config.rl_model['training']['max_steps_per_episode']
+        total_available = z0_options.shape[0]
+        num_cases = min(num_cases, total_available)
+        
+        # Randomly select cases for evaluation
+        eval_indices = np.random.choice(total_available, size=num_cases, replace=False)
+        
+        eval_npvs = []
+        
+        # Temporarily set policy to eval mode (disables dropout, uses running BN stats)
+        self.agent.policy.eval()
+        
+        for case_idx in eval_indices:
+            z0 = z0_options[case_idx:case_idx + 1]
+            state = self.environment.reset(z0_options=z0)
+            episode_reward = 0.0
+            
+            for step in range(max_steps):
+                with torch.no_grad():
+                    # Use evaluate=True for deterministic action (pure policy, no noise)
+                    action = self.agent.select_action(state, evaluate=True)
+                
+                next_state, reward, done = self.environment.step(action)
+                episode_reward += reward.item()
+                state = next_state
+                
+                if done:
+                    break
+            
+            eval_npvs.append(episode_reward)
+        
+        # Restore policy to train mode
+        self.agent.policy.train()
+        
+        mean_eval_npv = float(np.mean(eval_npvs))
+        std_eval_npv = float(np.std(eval_npvs))
+        
+        return mean_eval_npv, std_eval_npv
     
     def _load_configuration(self):
         """Load configuration and check prerequisites"""
@@ -286,10 +394,23 @@ class RLTrainingDashboard:
             print(f"   Batch size: {batch_size}")
             print(f"   Initial states: {z0_options.shape[0]}")
             
+            # Read evaluation-based checkpoint settings from dashboard
+            use_eval_checkpoint = self.eval_checkpoint_checkbox.value
+            eval_interval = self.eval_interval_spinner.value
+            eval_num_cases = self.eval_num_cases_spinner.value
+            
+            if use_eval_checkpoint:
+                print(f"\n   ✅ Evaluation-Based Checkpoint Selection: ENABLED")
+                print(f"      Eval every {eval_interval} episodes | {eval_num_cases} Z0 cases per eval")
+                print(f"      Checkpoints saved based on deterministic policy NPV (no exploration noise)")
+            else:
+                print(f"\n   ℹ️  Checkpoint Selection: Training reward (default)")
+            
             # Reset tracking variables
             self.episode_rewards = []
             self.avg_rewards = []
             self.best_reward = -np.inf
+            self.best_eval_reward = -np.inf  # Track best evaluation reward separately
             self.global_step = 0
             self.total_numsteps = 0
             
@@ -411,29 +532,82 @@ class RLTrainingDashboard:
                     
                     # Print progress
                     if episode % print_interval == 0:
-                        status_msg = (
-                            f"Episode {episode+1}/{max_episodes} | "
-                            f"Reward: {final_reward:.2f} | "
-                            f"Avg(10): {avg_reward:.2f} | "
-                            f"Best: {self.best_reward:.2f}"
-                        )
+                        if use_eval_checkpoint:
+                            status_msg = (
+                                f"Episode {episode+1}/{max_episodes} | "
+                                f"Train Reward: {final_reward:.2f} | "
+                                f"Avg(10): {avg_reward:.2f} | "
+                                f"Best Train: {self.best_reward:.2f} | "
+                                f"Best Eval: {self.best_eval_reward:.4f}"
+                            )
+                        else:
+                            status_msg = (
+                                f"Episode {episode+1}/{max_episodes} | "
+                                f"Reward: {final_reward:.2f} | "
+                                f"Avg(10): {avg_reward:.2f} | "
+                                f"Best: {self.best_reward:.2f}"
+                            )
                         print(status_msg)
                         self.training_info.value = f"<p><b>Status:</b> {status_msg}</p>"
                     
-                    # Save best model
-                    if final_reward > self.best_reward:
-                        self.best_reward = final_reward
-                        self.agent.save_checkpoint("best_model", suffix=f"ep{episode}")
-                        print(f"   💾 New best model saved! Reward: {self.best_reward:.2f}")
+                    # === CHECKPOINT SAVING ===
+                    if use_eval_checkpoint:
+                        # --- Evaluation-Based Checkpoint Selection ---
+                        # Track best training reward for display only
+                        if final_reward > self.best_reward:
+                            self.best_reward = final_reward
+                        
+                        # Run deterministic evaluation at the specified interval
+                        if episode % eval_interval == 0:
+                            mean_eval_npv, std_eval_npv = self._run_deterministic_evaluation(
+                                z0_options, num_cases=eval_num_cases
+                            )
+                            
+                            # Log evaluation result
+                            eval_msg = (
+                                f"   🔍 Eval (deterministic): Mean NPV = {mean_eval_npv:.4f} "
+                                f"± {std_eval_npv:.4f} | Best Eval = {self.best_eval_reward:.4f}"
+                            )
+                            print(eval_msg)
+                            
+                            # Log to WandB
+                            if self.wandb_logger:
+                                wandb.log({
+                                    'eval/mean_npv': mean_eval_npv,
+                                    'eval/std_npv': std_eval_npv,
+                                    'eval/best_npv': self.best_eval_reward,
+                                    'eval/episode': episode,
+                                }, step=self.global_step)
+                            
+                            # Save checkpoint only if evaluation NPV improved
+                            if mean_eval_npv > self.best_eval_reward:
+                                self.best_eval_reward = mean_eval_npv
+                                self.agent.save_checkpoint("best_model", suffix=f"ep{episode}")
+                                print(
+                                    f"   💾 New best model saved! "
+                                    f"Eval NPV: {self.best_eval_reward:.4f} "
+                                    f"(training reward was {final_reward:.2f})"
+                                )
+                    else:
+                        # --- Default: Training-reward-based checkpoint ---
+                        if final_reward > self.best_reward:
+                            self.best_reward = final_reward
+                            self.agent.save_checkpoint("best_model", suffix=f"ep{episode}")
+                            print(f"   💾 New best model saved! Reward: {self.best_reward:.2f}")
                     
-                    # Periodic save
+                    # Periodic save (always, regardless of checkpoint strategy)
                     if (episode + 1) % save_interval == 0:
                         self.agent.save_checkpoint("periodic", suffix=f"ep{episode+1}")
                         print(f"   💾 Checkpoint saved at episode {episode+1}")
                 
                 # Training complete
                 print(f"\n✅ Training completed!")
-                print(f"   Best reward: {self.best_reward:.2f}")
+                print(f"   Best training reward: {self.best_reward:.2f}")
+                if use_eval_checkpoint:
+                    print(f"   Best evaluation NPV (deterministic): {self.best_eval_reward:.4f}")
+                    print(f"   Checkpoint saved based on: evaluation NPV")
+                else:
+                    print(f"   Checkpoint saved based on: training reward")
                 print(f"   Total episodes: {len(self.episode_rewards)}")
                 
                 # Get training summary
@@ -447,10 +621,17 @@ class RLTrainingDashboard:
                 if self.wandb_logger:
                     self.wandb_logger.finish()
                 
-                self.training_info.value = (
-                    f"<p><b>Status:</b> Training completed! "
-                    f"Best reward: {self.best_reward:.2f}</p>"
-                )
+                if use_eval_checkpoint:
+                    self.training_info.value = (
+                        f"<p><b>Status:</b> Training completed! "
+                        f"Best eval NPV: {self.best_eval_reward:.4f} | "
+                        f"Best train reward: {self.best_reward:.2f}</p>"
+                    )
+                else:
+                    self.training_info.value = (
+                        f"<p><b>Status:</b> Training completed! "
+                        f"Best reward: {self.best_reward:.2f}</p>"
+                    )
                 
             except Exception as e:
                 print(f"❌ Training error: {e}")

@@ -1,8 +1,8 @@
 """
 Main Run File for RL-SAC Training and Classical Optimization
 ==============================================================
-RL Workflow: Steps 1-3
-Classical Optimization Workflow: Steps 4-6
+RL Workflow: Steps 1-4 (Training + Evaluation)
+Classical Optimization Workflow: Steps 5-7
 """
 #%%
 # === SETUP (Run this cell first) ===
@@ -33,15 +33,20 @@ training_dashboard = create_rl_training_dashboard(config_path='config.yaml')
 from RL_Refactored.visualization import launch_interactive_scientific_analysis
 viz_dashboard = launch_interactive_scientific_analysis(training_dashboard=training_dashboard)
 
+#%% STEP 4: RL Policy Evaluation Dashboard
+# Evaluate trained policy across multiple Z0 cases and compare against baselines
+from RL_Refactored.evaluation import EvaluationDashboard, launch_evaluation_dashboard
+eval_dashboard = launch_evaluation_dashboard()
+
 # ==============================================================================
 #                      CLASSICAL OPTIMIZATION WORKFLOW
 # ==============================================================================
 
-#%% STEP 4: Optimizer Configuration Dashboard
+#%% STEP 5: Optimizer Configuration Dashboard
 from RL_Refactored.optimizers import launch_optimizer_config_dashboard
 optimizer_config_dashboard = launch_optimizer_config_dashboard()
 
-#%% STEP 5: Run Classical Optimization
+#%% STEP 6: Run Classical Optimization
 from RL_Refactored.optimizers import create_optimizer, run_optimization
 import builtins
 optimizer_config = getattr(builtins, 'optimizer_dashboard_config', None)
@@ -49,13 +54,13 @@ if optimizer_config:
     optimizer = create_optimizer(optimizer_config)
     optimizer_result = run_optimization(optimizer, z0_options=optimizer_config['z0_options'], num_steps=optimizer_config['num_steps'])
 else:
-    print("Run STEP 4 first and click 'Apply Configuration'")
+    print("Run STEP 5 first and click 'Apply Configuration'")
 
-#%% STEP 6: Optimizer Results Dashboard
+#%% STEP 7: Optimizer Results Dashboard
 from RL_Refactored.optimizers import launch_optimizer_results_dashboard
 if 'optimizer_result' in dir() and optimizer_result:
     opt_viz = launch_optimizer_results_dashboard(optimizer_result, config=optimizer_config.get('config'))
 else:
-    print("Run STEP 5 first")
+    print("Run STEP 6 first")
 
 # %%
