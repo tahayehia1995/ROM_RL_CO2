@@ -288,7 +288,7 @@ class ModelEvaluationMetrics:
         
         return metrics
     
-    def get_timeseries_metrics(self, case_idx, obs_idx, norm_params=None):
+    def get_timeseries_metrics(self, case_idx, obs_idx, norm_params=None, yobs_pred_override=None):
         """
         Get metrics for timeseries prediction at specific case and observation variable
         
@@ -296,17 +296,20 @@ class ModelEvaluationMetrics:
             case_idx: Case index
             obs_idx: Observation variable index
             norm_params: Normalization parameters for denormalization (optional)
+            yobs_pred_override: Alternative prediction tensor to use instead of self.yobs_pred (optional)
             
         Returns:
             Dictionary with metrics
         """
-        # Check if metrics already computed and cached
-        cache_key = f"{case_idx}_{obs_idx}"
-        if cache_key in self.timeseries_metrics_cache:
-            return self.timeseries_metrics_cache[cache_key]
+        # Only use cache when no override is provided
+        if yobs_pred_override is None:
+            cache_key = f"{case_idx}_{obs_idx}"
+            if cache_key in self.timeseries_metrics_cache:
+                return self.timeseries_metrics_cache[cache_key]
         
         # Extract true and predicted data
-        pred = self.yobs_pred[case_idx, :, obs_idx].cpu().detach().numpy()
+        pred_source = yobs_pred_override if yobs_pred_override is not None else self.yobs_pred
+        pred = pred_source[case_idx, :, obs_idx].cpu().detach().numpy()
         true = self.yobs_true[case_idx, obs_idx, :].cpu().numpy()
         
         # Denormalize if normalization parameters provided
@@ -381,8 +384,10 @@ class ModelEvaluationMetrics:
         # Compute metrics without negative filtering for timeseries (some observations can be negative)
         metrics = self._compute_metrics(true, pred, filter_negative_predictions=False)
         
-        # Cache the result
-        self.timeseries_metrics_cache[cache_key] = metrics
+        # Cache the result only when using default predictions
+        if yobs_pred_override is None:
+            cache_key = f"{case_idx}_{obs_idx}"
+            self.timeseries_metrics_cache[cache_key] = metrics
         
         return metrics
     
@@ -618,7 +623,7 @@ class ModelEvaluationMetrics:
         
         return ax
     
-    def plot_timeseries_metrics(self, case_idx, obs_idx, ax=None, norm_params=None):
+    def plot_timeseries_metrics(self, case_idx, obs_idx, ax=None, norm_params=None, yobs_pred_override=None):
         """
         Plot metrics for timeseries prediction as actual vs predicted scatter plot
         
@@ -627,15 +632,17 @@ class ModelEvaluationMetrics:
             obs_idx: Observation variable index
             ax: Matplotlib axis (optional)
             norm_params: Normalization parameters for denormalization (optional)
+            yobs_pred_override: Alternative prediction tensor to use instead of self.yobs_pred (optional)
             
         Returns:
             Matplotlib axis
         """
         # Get data and metrics
-        metrics = self.get_timeseries_metrics(case_idx, obs_idx, norm_params)
+        metrics = self.get_timeseries_metrics(case_idx, obs_idx, norm_params, yobs_pred_override)
         
         # Extract true and predicted data
-        pred = self.yobs_pred[case_idx, :, obs_idx].cpu().detach().numpy()
+        pred_source = yobs_pred_override if yobs_pred_override is not None else self.yobs_pred
+        pred = pred_source[case_idx, :, obs_idx].cpu().detach().numpy()
         true = self.yobs_true[case_idx, obs_idx, :].cpu().numpy()
         
         # Denormalize if normalization parameters provided

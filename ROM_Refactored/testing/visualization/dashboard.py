@@ -421,7 +421,16 @@ class InteractiveVisualizationDashboard:
             description='🔬 Compare State-based vs Latent-based Predictions',
             style={'description_width': 'initial'},
             layout=widgets.Layout(width='400px'),
-            disabled=(self.my_rom is None)  # Disable if no ROM model provided
+            disabled=(self.my_rom is None)
+        )
+        
+        # Checkbox to show/hide state-based predictions
+        self.show_state_based_checkbox = widgets.Checkbox(
+            value=True,
+            description='👁️ Show State-based Predictions',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='400px'),
+            disabled=(self.my_rom is None)
         )
         
         # Output areas
@@ -460,8 +469,9 @@ class InteractiveVisualizationDashboard:
         self.timeseries_case_slider.observe(self._update_timeseries_plot, names='value')
         self.timeseries_obs_dropdown.observe(self._update_timeseries_plot, names='value')
         
-        # Comparison mode handler
+        # Comparison mode handlers
         self.comparison_mode_checkbox.observe(self._on_comparison_mode_toggle, names='value')
+        self.show_state_based_checkbox.observe(self._on_show_state_based_toggle, names='value')
         
         # Add handlers for metrics updates
         self.spatial_case_slider.observe(self._update_spatial_metrics, names='value')
@@ -545,81 +555,118 @@ class InteractiveVisualizationDashboard:
         self.comparison_mode_enabled = change['new']
         
         if self.comparison_mode_enabled:
-            print("🔬 Comparison mode enabled: Generating both state-based and latent-based predictions...")
-            
-            # Generate both prediction types if not already done
             if not self.predictions_generated:
                 self._generate_comparison_predictions()
             
-            print("✅ Comparison mode ready! Timeseries plots will show both prediction methods.")
-        else:
-            print("🔬 Comparison mode disabled: Showing default predictions only.")
+            if not self.predictions_generated:
+                self.comparison_mode_enabled = False
+                self.comparison_mode_checkbox.value = False
+                return
         
-        # Update timeseries plot to reflect the change
         self._update_timeseries_plot()
+    
+    def _on_show_state_based_toggle(self, change):
+        """Handle show state-based predictions checkbox toggle"""
+        if self.comparison_mode_enabled:
+            self._update_timeseries_plot()
     
     def _generate_comparison_predictions(self):
         """Generate both state-based and latent-based predictions for comparison"""
-        if self.my_rom is None or self.test_controls is None or self.test_observations is None:
-            print("❌ Cannot generate comparison predictions: ROM model or test data not provided")
-            return
-        
-        print("🚀 Generating predictions using both methods...")
-        print("   📊 This may take a moment for large datasets...")
-        
-        try:
-            import torch
-            import numpy as np
+        with self.timeseries_output:
+            clear_output(wait=True)
             
-            # Use the current yobs_pred as state-based predictions (assuming default mode)
-            self.yobs_pred_state_based = self.yobs_pred.clone()
+            if self.my_rom is None or self.test_controls is None or self.test_observations is None:
+                missing = []
+                if self.my_rom is None:
+                    missing.append("ROM model")
+                if self.test_controls is None:
+                    missing.append("test controls")
+                if self.test_observations is None:
+                    missing.append("test observations")
+                print(f"❌ Cannot generate comparison predictions — missing: {', '.join(missing)}")
+                return
             
-            # Generate latent-based predictions
-            print("   ⚡ Generating latent-based predictions...")
-            self.yobs_pred_latent_based = self._generate_latent_predictions()
-            
-            self.predictions_generated = True
-            print("✅ Both prediction types generated successfully!")
-            
-        except Exception as e:
-            print(f"❌ Error generating comparison predictions: {e}")
-            print("   Using default predictions only.")
-            self.comparison_mode_enabled = False
-            self.comparison_mode_checkbox.value = False
+            try:
+                print("🔬 Generating comparison predictions...")
+                print(f"   Cases: {self.num_case}, Timesteps: {self.num_tstep}")
+                
+                self.yobs_pred_state_based = self.yobs_pred.clone()
+                
+                print("   ⚡ Generating latent-based predictions...")
+                self.yobs_pred_latent_based = self._generate_latent_predictions()
+                
+                self.predictions_generated = True
+                print("✅ Both prediction types generated successfully!")
+                
+            except Exception as e:
+                print(f"❌ Error generating comparison predictions: {e}")
+                import traceback
+                traceback.print_exc()
+                self.predictions_generated = False
     
     def _generate_latent_predictions(self):
-        """Generate predictions using latent-based approach"""
-        # Initialize prediction array
+        """Generate predictions using latent-based approach.
+        
+        For linear transitions: encode initial state → iterate in latent space.
+        For spatial/hybrid transitions: re-run sequential prediction using
+        the spatial state output (no re-encode), which mirrors the original
+        predictor but keeps observations from each step independently.
+        """
         yobs_pred_latent = torch.zeros_like(self.yobs_pred)
         
-        # Time step configuration (same as in generate_test_visualization)
-        t_steps = np.arange(0, 200, 200//self.num_tstep)
+        t_steps = np.arange(0, 200, 200 // self.num_tstep)
         dt = 10
         t_steps1 = (t_steps + dt).astype(int)
         indt_del = t_steps1 - t_steps
         indt_del = indt_del / max(indt_del)
         
-        # Get initial states - encode from spatial to latent
-        initial_spatial_state = self.state_pred[:, 0, :, :, :, :].to(self.device)  # First timestep
+        transition_mode = getattr(self.my_rom.model, 'transition_mode', 'latent')
+        print(f"   Transition mode: {transition_mode}")
         
+        self.my_rom.model.eval()
         with torch.no_grad():
-            # Encode initial spatial state to latent
-            initial_latent_state = self.my_rom.model.encoder(initial_spatial_state)
-            latent_state = initial_latent_state
-            
-            # Sequential prediction in latent space
-            for i_tstep in range(self.num_tstep):
-                # Time step for current iteration
-                dt_seq = torch.tensor(np.ones((self.num_case, 1)) * indt_del[i_tstep], dtype=torch.float32).to(self.device)
+            if transition_mode == 'latent':
+                # Pure latent-space rollout (no decode/re-encode per step)
+                initial_spatial = self.state_pred[:, 0, :, :, :, :].to(self.device)
+                # VAE encoder returns (z, mu, logvar) — use z (first element)
+                enc_out = self.my_rom.model.encoder(initial_spatial)
+                latent_state = enc_out[0] if isinstance(enc_out, (tuple, list)) else enc_out
                 
-                # Get controls for this timestep
-                controls = self.test_controls[:, :, i_tstep].to(self.device)
-                
-                # Predict using latent-based approach
-                latent_state, yobs_pred = self.my_rom.predict_latent(latent_state, dt_seq, controls)
-                
-                # Store predictions
-                yobs_pred_latent[:, i_tstep, :] = yobs_pred.cpu()
+                for i_tstep in range(self.num_tstep):
+                    dt_seq = torch.tensor(
+                        np.ones((self.num_case, 1)) * indt_del[i_tstep],
+                        dtype=torch.float32
+                    ).to(self.device)
+                    controls = self.test_controls[:, :, i_tstep].to(self.device)
+                    
+                    latent_state, yobs = self.my_rom.model.predict_latent(
+                        latent_state, dt_seq, controls
+                    )
+                    yobs_pred_latent[:, i_tstep, :] = yobs.cpu()
+                    
+                    if (i_tstep + 1) % 5 == 0:
+                        print(f"   Step {i_tstep + 1}/{self.num_tstep} completed")
+            else:
+                # Spatial/hybrid: true-initialized single-step predictions
+                # (each step starts from the TRUE spatial state — shows model
+                # accuracy without auto-regressive error accumulation)
+                print("   Using true-initialized mode for spatial transition")
+                for i_tstep in range(self.num_tstep):
+                    # state_seq_true_aligned: (cases, channels, tsteps, Nx, Ny, Nz)
+                    true_state = self.state_seq_true_aligned[:, :, i_tstep, :, :, :].to(self.device)
+                    dt_seq = torch.tensor(
+                        np.ones((self.num_case, 1)) * indt_del[i_tstep],
+                        dtype=torch.float32
+                    ).to(self.device)
+                    controls = self.test_controls[:, :, i_tstep].to(self.device)
+                    obs_placeholder = self.test_observations[:, :, i_tstep].to(self.device)
+                    
+                    inputs = (true_state, controls, obs_placeholder, dt_seq)
+                    _, yobs = self.my_rom.predict(inputs)
+                    yobs_pred_latent[:, i_tstep, :] = yobs.cpu()
+                    
+                    if (i_tstep + 1) % 5 == 0:
+                        print(f"   Step {i_tstep + 1}/{self.num_tstep} completed")
         
         return yobs_pred_latent
             
@@ -1055,8 +1102,8 @@ class InteractiveVisualizationDashboard:
         
         Produces two CSV files:
         1. Timeseries CSV: rows=timesteps, columns=well observations (BHP, Gas, Water per well)
-        2. Spatial CSV: rows=(timestep, i, j, k), columns=channel predictions
-        Both files contain denormalized predicted values.
+        2. Spatial CSV: rows=timesteps, columns=Channel_i_j_k for every (channel, cell)
+        Both files contain denormalized predicted values with negatives clipped to zero.
         """
         import csv
         
@@ -1084,12 +1131,10 @@ class InteractiveVisualizationDashboard:
                 ts_filename = f"case_{actual_case_id}_timeseries.csv"
                 ts_path = os.path.join(output_dir, ts_filename)
                 
-                # Build header
                 ts_header = ['Year']
                 for name in self.obs_names:
                     ts_header.append(name)
                 
-                # Extract observation data for this case
                 yobs_pred_case = self.yobs_pred[case_idx].cpu().detach().numpy()   # (num_tstep, 9)
                 
                 with open(ts_path, 'w', newline='') as f:
@@ -1101,64 +1146,63 @@ class InteractiveVisualizationDashboard:
                         for obs_idx in range(9):
                             pred_val = float(self._denormalize_obs_data(
                                 yobs_pred_case[t, obs_idx], obs_idx))
-                            row.append(pred_val)
+                            row.append(max(0.0, pred_val))
                         writer.writerow(row)
                 
                 saved_files.append(ts_filename)
                 print(f"  ✅ Saved {ts_filename}  ({self.num_tstep} timesteps × {len(self.obs_names)} wells)")
                 
                 # ── 2. Spatial (channels) CSV ──────────────────────────────
+                # One row per timestep; spatial cells flattened into columns
                 print(f"\n🗺️  Saving spatial (channels) predictions...")
                 
                 sp_filename = f"case_{actual_case_id}_spatial.csv"
                 sp_path = os.path.join(output_dir, sp_filename)
                 
-                # Build header: Year, i, j, k, channel1, channel2, ...
-                sp_header = ['Year', 'i', 'j', 'k']
-                for ch_name in self.channel_names:
-                    sp_header.append(ch_name)
-                
                 n_channels = len(self.channel_names)
-                total_rows = self.num_tstep * self.Nx * self.Ny * self.Nz
-                print(f"  Grid: {self.Nx}×{self.Ny}×{self.Nz} = {self.Nx*self.Ny*self.Nz} cells × {self.num_tstep} timesteps = {total_rows} rows")
+                n_cells = self.Nx * self.Ny * self.Nz
                 
-                # Pre-extract and denormalize all channel data for this case
+                # Build header: Year, Channel_i_j_k for every (channel, i, j, k)
+                sp_header = ['Year']
+                for ch_name in self.channel_names:
+                    for ix in range(self.Nx):
+                        for iy in range(self.Ny):
+                            for iz in range(self.Nz):
+                                sp_header.append(f"{ch_name}_{ix}_{iy}_{iz}")
+                
+                print(f"  Grid: {self.Nx}×{self.Ny}×{self.Nz} = {n_cells} cells × {n_channels} channels = {n_cells * n_channels} columns per timestep")
+                
+                # Pre-extract and denormalize all channel data, clip negatives
                 pred_channels = []   # list of (num_tstep, Nx, Ny, Nz) arrays
                 
                 for ch_idx, ch_name in enumerate(self.channel_names):
                     field_key = self.field_keys[ch_idx]
                     
-                    # Predicted: state_pred shape (num_case, num_tstep, n_channels, Nx, Ny, Nz)
                     pred_raw = self.state_pred[case_idx, :, ch_idx, :, :, :].cpu().detach().numpy()
                     
-                    # Denormalize each timestep
                     pred_denorm = np.zeros_like(pred_raw)
                     for t in range(self.num_tstep):
                         pred_denorm[t] = self._denormalize_field_data(pred_raw[t], field_key)
                     
+                    np.clip(pred_denorm, 0.0, None, out=pred_denorm)
                     pred_channels.append(pred_denorm)
                 
-                # Write spatial CSV
+                # Write spatial CSV — one row per timestep
                 with open(sp_path, 'w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(sp_header)
                     
                     for t in range(self.num_tstep):
-                        year = years[t]
-                        for ix in range(self.Nx):
-                            for iy in range(self.Ny):
-                                for iz in range(self.Nz):
-                                    row = [year, ix, iy, iz]
-                                    for ch_idx in range(n_channels):
-                                        row.append(float(pred_channels[ch_idx][t, ix, iy, iz]))
-                                    writer.writerow(row)
+                        row = [years[t]]
+                        for ch_idx in range(n_channels):
+                            row.extend(pred_channels[ch_idx][t].ravel().tolist())
+                        writer.writerow(row)
                         
-                        # Progress update every 10 timesteps
                         if (t + 1) % 10 == 0 or t == self.num_tstep - 1:
                             print(f"    Timestep {t+1}/{self.num_tstep} written...")
                 
                 saved_files.append(sp_filename)
-                print(f"  ✅ Saved {sp_filename}  ({total_rows} rows × {len(sp_header)} columns)")
+                print(f"  ✅ Saved {sp_filename}  ({self.num_tstep} rows × {len(sp_header)} columns)")
                 
                 # ── Summary ────────────────────────────────────────────────
                 print(f"\n✅ Successfully exported Case {case_idx} (Simulation #{actual_case_id})")
@@ -1451,21 +1495,24 @@ class InteractiveVisualizationDashboard:
             ax.plot(years_ts, true_data_denorm, 'b-', label='Ground Truth', linewidth=3, alpha=0.9)
             
             if self.comparison_mode_enabled and self.predictions_generated:
-                # COMPARISON MODE: Show both prediction methods
+                # COMPARISON MODE: Show both prediction methods (if enabled)
+                transition_mode = getattr(self.my_rom.model, 'transition_mode', 'latent')
+                is_latent = (transition_mode == 'latent')
                 
-                # State-based predictions
-                state_pred_data = self.yobs_pred_state_based[case_idx, :self.num_tstep, obs_idx].cpu().detach().numpy()
-                state_pred_denorm = self._denormalize_obs_data(state_pred_data, obs_idx)
-                state_pred_denorm = np.maximum(state_pred_denorm, 0.0)
+                alt_label = 'Latent-based Prediction' if is_latent else 'True-initialized Prediction'
                 
-                # Latent-based predictions
-                latent_pred_data = self.yobs_pred_latent_based[case_idx, :self.num_tstep, obs_idx].cpu().detach().numpy()
-                latent_pred_denorm = self._denormalize_obs_data(latent_pred_data, obs_idx)
-                latent_pred_denorm = np.maximum(latent_pred_denorm, 0.0)
+                # Alternative predictions (always show in comparison mode)
+                alt_pred_data = self.yobs_pred_latent_based[case_idx, :self.num_tstep, obs_idx].cpu().detach().numpy()
+                alt_pred_denorm = self._denormalize_obs_data(alt_pred_data, obs_idx)
+                alt_pred_denorm = np.maximum(alt_pred_denorm, 0.0)
+                ax.plot(years_ts, alt_pred_denorm, 'm:', label=alt_label, linewidth=2, alpha=0.8)
                 
-                # Plot both prediction methods
-                ax.plot(years_ts, state_pred_denorm, 'g--', label='State-based Prediction', linewidth=2, alpha=0.8)
-                ax.plot(years_ts, latent_pred_denorm, 'm:', label='Latent-based Prediction', linewidth=2, alpha=0.8)
+                # State-based (auto-regressive) predictions (only if checkbox is enabled)
+                if self.show_state_based_checkbox.value:
+                    state_pred_data = self.yobs_pred_state_based[case_idx, :self.num_tstep, obs_idx].cpu().detach().numpy()
+                    state_pred_denorm = self._denormalize_obs_data(state_pred_data, obs_idx)
+                    state_pred_denorm = np.maximum(state_pred_denorm, 0.0)
+                    ax.plot(years_ts, state_pred_denorm, 'g--', label='State-based Prediction', linewidth=2, alpha=0.8)
                 
                 title_suffix = " - Comparison Mode"
                 
@@ -1540,30 +1587,53 @@ class InteractiveVisualizationDashboard:
                 pass
     
     def _update_timeseries_metrics(self, change=None):
-        """Update timeseries metrics visualization"""
+        """Update timeseries metrics visualization based on active prediction method"""
         with self.timeseries_metrics_output:
             clear_output(wait=True)
             
-            # Get current selections
             case_idx = self.timeseries_case_slider.value
             obs_idx = self.timeseries_obs_dropdown.value
             
-            # Create figure for metrics
-            fig, ax = plt.subplots(figsize=(10, 5))
-            self.metrics_evaluator.plot_timeseries_metrics(
-                case_idx, obs_idx, 
-                ax=ax, norm_params=self.norm_params
-            )
+            if self.comparison_mode_enabled and self.predictions_generated:
+                show_state = self.show_state_based_checkbox.value
+                transition_mode = getattr(self.my_rom.model, 'transition_mode', 'latent')
+                is_latent = (transition_mode == 'latent')
+                alt_label = 'Latent-based' if is_latent else 'True-initialized'
+                
+                if show_state:
+                    # Both visible → show side-by-side metrics
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+                    self.metrics_evaluator.plot_timeseries_metrics(
+                        case_idx, obs_idx, ax=ax1, norm_params=self.norm_params,
+                        yobs_pred_override=self.yobs_pred_state_based
+                    )
+                    ax1.set_title(ax1.get_title().replace(f'Case {case_idx}', f'Case {case_idx} (State-based)'), fontsize=11, fontweight='bold')
+                    
+                    self.metrics_evaluator.plot_timeseries_metrics(
+                        case_idx, obs_idx, ax=ax2, norm_params=self.norm_params,
+                        yobs_pred_override=self.yobs_pred_latent_based
+                    )
+                    ax2.set_title(ax2.get_title().replace(f'Case {case_idx}', f'Case {case_idx} ({alt_label})'), fontsize=11, fontweight='bold')
+                else:
+                    # Only latent/true-initialized visible
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    self.metrics_evaluator.plot_timeseries_metrics(
+                        case_idx, obs_idx, ax=ax, norm_params=self.norm_params,
+                        yobs_pred_override=self.yobs_pred_latent_based
+                    )
+                    ax.set_title(ax.get_title().replace(f'Case {case_idx}', f'Case {case_idx} ({alt_label})'), fontsize=11, fontweight='bold')
+            else:
+                # Standard mode
+                fig, ax = plt.subplots(figsize=(10, 5))
+                self.metrics_evaluator.plot_timeseries_metrics(
+                    case_idx, obs_idx, ax=ax, norm_params=self.norm_params
+                )
             
             plt.tight_layout()
-            
-            # Display in widget context
             display(fig)
-            # Close figure with error handling to prevent backend issues
             try:
                 plt.close(fig)
             except (AttributeError, RuntimeError):
-                # If closing fails (e.g., manager is None), just continue
                 pass
     
     def _create_overall_metrics_tab(self):
@@ -3855,7 +3925,9 @@ class InteractiveVisualizationDashboard:
             self.timeseries_obs_dropdown,
             widgets.HTML("<br>"),
             self.comparison_mode_checkbox,
-            widgets.HTML("<p><i><b>Comparison Mode:</b> When enabled, plots will show both state-based and latent-based predictions against ground truth for direct comparison.</i></p>")
+            self.show_state_based_checkbox,
+            widgets.HTML("<p><i><b>Comparison Mode:</b> When enabled, plots will show both state-based and latent-based predictions against ground truth for direct comparison.</i></p>"),
+            widgets.HTML("<p><i><b>Show State-based:</b> Toggle visibility of state-based predictions (can be hidden if showing poor results).</i></p>")
         ])
         
         timeseries_tab = widgets.VBox([
