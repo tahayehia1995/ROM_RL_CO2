@@ -1,0 +1,613 @@
+data_preprocessing:
+  paths:
+    data_dir: sr3_batch_output/
+    processed_data_dir: ./processed_data/
+    normalization_params_dir: ./processed_data/
+  processing: &id001
+    nsteps: 2
+    train_split_ratio: 0.75
+    random_seed: 42
+  normalization: &id002
+    default_spatial_normalization: minmax
+    default_timeseries_normalization: minmax
+    spatial_datasets:
+      PRES: minmax
+      SG: minmax
+      SW: minmax
+      PERMI: log
+      PERMJ: log
+      PERMK: log
+      POROS: minmax
+    timeseries_datasets:
+      BHP: minmax
+      GASRATSC: minmax
+      WATRATSC: minmax
+  validation:
+    check_file_integrity: true
+    check_data_shapes: true
+    check_data_ranges: true
+    warn_on_missing_files: true
+  output:
+    save_normalization_params: true
+    save_processed_data: true
+    include_metadata: true
+    include_data_selections: true
+    timestamp_files: true
+  runtime:
+    verbose: true
+    show_progress: true
+model:
+  latent_dim: 128
+  u_dim: 6
+  n_channels: 4
+  method: E2C
+  sigma: 0.0
+  enable_vae: false
+multimodal:
+  enable: true
+  static_latent_dim: 32
+  dynamic_latent_dim: 96
+  static_channels:
+  - 2
+  - 3
+  dynamic_channels:
+  - 0
+  - 1
+gnn:
+  enable: false
+  conv_type: gine
+  max_sub_batch: 32
+  torch_compile: false
+  well_readout_lambda: 1.0
+  encoder:
+    num_layers: 3
+    hidden_dim: 128
+    num_heads: 2
+    dropout: 0.1
+  decoder:
+    num_layers: 3
+    hidden_dim: 128
+    num_heads: 2
+    dropout: 0.1
+    broadcast_hidden_dim: 256
+    broadcast_num_layers: 4
+  pooling: attention
+  mask_file_path: sr3_batch_output/inactive_cell_locations.h5
+data:
+  input_shape:
+  - 4
+  - 34
+  - 16
+  - 25
+  num_prod: 3
+  num_inj: 3
+  well_locations:
+    injectors:
+      I1:
+      - 10
+      - 12
+      - 24
+      I2:
+      - 31
+      - 13
+      - 24
+      I4:
+      - 8
+      - 1
+      - 24
+    producers:
+      P1:
+      - 1
+      - 11
+      - 24
+      P2:
+      - 16
+      - 4
+      - 24
+      P3:
+      - 18
+      - 11
+      - 24
+encoder:
+  norm_type: batchnorm
+  conv_layers:
+    conv1:
+    - 4
+    - 16
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv2:
+    - 16
+    - 32
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    conv3:
+    - 32
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv4:
+    - 64
+    - 128
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+  residual_blocks: 3
+  residual_channels: 128
+  output_dims:
+  - 128
+  - 9
+  - 4
+  - 7
+  flattened_size: 32256
+decoder:
+  type: smooth
+  deconv_layers:
+    deconv1:
+    - 128
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    deconv2:
+    - 64
+    - 32
+    - - 4
+      - 4
+      - 4
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    deconv3:
+    - 32
+    - 16
+    - - 3
+      - 3
+      - 3
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    deconv4:
+    - 16
+    - 16
+    - - 4
+      - 4
+      - 4
+    - - 2
+      - 2
+      - 2
+    - - 2
+      - 1
+      - 3
+    - - 0
+      - 0
+      - 1
+    final_conv:
+    - 16
+    - 4
+    - - 1
+      - 1
+      - 1
+    - - 1
+      - 1
+      - 1
+    - - 0
+      - 0
+      - 0
+  crop_z_to: null
+  use_exact_dimensions: true
+  norm_type: batchnorm
+transition:
+  type: linear
+  encoder_hidden_dims:
+  - 300
+  - 300
+  - 300
+  clru:
+    nu_clamp_max: 2.0
+  s4d: {}
+  s4d_dplr:
+    rank: 8
+  s5: {}
+  koopman: {}
+  ct_koopman: {}
+  nonlinear:
+    n_euler_steps: 4
+    ode_hidden_dims:
+    - 256
+    - 256
+    obs_head: linear
+  mamba:
+    dt_rank: 8
+  mamba2:
+    n_heads: 4
+  stable_koopman:
+    use_complex: false
+    eigval_constraint: sigmoid
+  deep_koopman:
+    encoder_hidden_dims:
+    - 256
+    - 256
+  gru:
+    num_layers: 1
+  lstm:
+    num_layers: 1
+  hamiltonian:
+    n_euler_steps: 4
+    hamiltonian_hidden_dims:
+    - 128
+    - 128
+  skolr:
+    n_branches: 4
+    rnn_hidden_dim: 64
+    measurement_hidden_dims:
+    - 128
+  ren:
+    n_neurons: 64
+    n_fp_steps: 5
+    contraction_rate: 0.99
+    activation: tanh
+  koopman_aft:
+    window_size: 3
+    aft_dim: 64
+  dissipative_koopman:
+    svd_constraint: sigmoid
+    contraction_eps: 0.01
+  bilinear_koopman:
+    use_low_rank_N: false
+    N_rank: 16
+  isfno:
+    lift_hidden_dim: 128
+    n_spectral_modes: null
+    n_inv_steps: 5
+  sindy:
+    poly_order: 3
+    include_sine: false
+    coefficient_threshold: 0.1
+    threshold_frequency: 500
+  neural_cde:
+    cde_hidden_dims:
+    - 256
+    - 256
+    n_integration_steps: 4
+  latent_sde:
+    drift_hidden_dims:
+    - 256
+    - 256
+    diffusion_hidden_dims:
+    - 128
+    diffusion_type: diagonal
+    n_euler_steps: 4
+  transformer:
+    n_heads: 4
+    n_layers: 2
+    d_model: 128
+    window_size: 5
+    dropout: 0.1
+  deeponet:
+    branch_hidden_dims:
+    - 256
+    - 256
+    trunk_hidden_dims:
+    - 128
+    - 128
+    basis_dim: 64
+training:
+  batch_size: 16
+  learning_rate: 0.0001
+  nsteps: 2
+  num_tsteps: 30
+  epoch: 200
+  enable_scheduled_sampling: false
+  scheduled_sampling:
+    schedule_type: exponential
+    start_epoch: 0
+    end_epoch: 150
+    start_p: 1.0
+    end_p: 0.1
+  enable_latent_noise: false
+  latent_noise:
+    noise_std: 0.01
+    anneal: true
+    start_std: 0.05
+    end_std: 0.005
+    anneal_epochs: 100
+learning_rate_scheduler:
+  enable: false
+  type: constant
+  reduce_on_plateau:
+    mode: min
+    factor: 0.5
+    patience: 5
+    threshold: 0.0001
+    threshold_mode: rel
+    cooldown: 3
+    min_lr: 1.0e-07
+    eps: 1.0e-08
+    verbose: true
+  exponential_decay:
+    gamma: 0.95
+  step_decay:
+    step_size: 100
+    gamma: 0.5
+  cosine_annealing:
+    T_max: 20
+    eta_min: 1.0e-06
+  cyclic:
+    base_lr: 1.0e-05
+    max_lr: 0.001
+    step_size_up: 500
+    step_size_down: null
+    mode: triangular
+    gamma: 1.0
+    scale_fn: null
+    scale_mode: cycle
+    cycle_momentum: true
+    base_momentum: 0.8
+    max_momentum: 0.9
+  one_cycle:
+    max_lr: 0.001
+    total_steps: null
+    epochs: null
+    steps_per_epoch: null
+    pct_start: 0.3
+    anneal_strategy: cos
+    cycle_momentum: true
+    base_momentum: 0.85
+    max_momentum: 0.95
+    div_factor: 25.0
+    final_div_factor: 10000.0
+  discriminator:
+    enable: false
+    type: fixed
+  logging:
+    log_lr_every_batch: false
+    log_lr_every_epoch: true
+    log_scheduler_events: true
+    include_momentum: true
+loss:
+  enable_flux_loss: false
+  enable_bhp_loss: false
+  enable_non_negative_loss: false
+  lambda_non_negative_loss: 1.0
+  enable_kl_loss: false
+  lambda_kl_loss: 0.001
+  enable_kl_annealing: false
+  kl_annealing_schedule:
+  - epoch: 0
+    lambda: 0.0
+  - epoch: 50
+    lambda: 1.0e-06
+  - epoch: 100
+    lambda: 1.0e-05
+  - epoch: 150
+    lambda: 0.0001
+  - epoch: 400
+    lambda: 0.001
+  lambda_reconstruction_loss: 1.0
+  enable_per_element_normalization: true
+  reconstruction_variance: 1.0
+  lambda_flux_loss: 0.001
+  lambda_bhp_loss: 20.0
+  lambda_trans_loss: 1.0
+  lambda_yobs_loss: 5.0
+  channel_mapping:
+    pressure: 2
+    perm_x: 3
+    perm_y: 4
+    perm_z: 5
+    trans_x: 6
+    trans_y: 7
+    trans_z: 8
+    use_precomputed_trans: false
+  enable_jacobian_loss: false
+  lambda_jacobian_loss: 0.01
+  enable_cycle_loss: false
+  lambda_cycle_loss: 0.1
+  enable_eigloss: true
+  lambda_eigloss: 0.01
+  enable_consistency_loss: true
+  lambda_consistency_loss: 0.1
+  enable_energy_loss: true
+  lambda_energy_loss: 0.1
+  enable_dissipativity_loss: true
+  lambda_dissipativity_loss: 0.01
+  enable_reversibility_loss: true
+  lambda_reversibility_loss: 0.1
+  enable_sindy_sparsity_loss: true
+  lambda_sindy_sparsity_loss: 0.01
+  enable_sindy_consistency_loss: true
+  lambda_sindy_consistency_loss: 0.01
+  enable_sde_kl_loss: true
+  lambda_sde_kl_loss: 0.01
+  enable_fft_loss: false
+  lambda_fft_loss: 0.1
+  enable_gradient_loss: true
+  lambda_gradient_loss: 0.05
+  gradient_loss_directions:
+  - x
+  - y
+  - z
+  enable_inactive_masking: true
+  mask_file_path: sr3_batch_output/inactive_cell_locations.h5
+dynamic_loss_weighting:
+  enable: false
+  method: gradnorm
+  gradnorm:
+    alpha: 0.12
+    learning_rate: 0.025
+  uncertainty:
+    log_variance_init: 0.0
+  dwa:
+    temperature: 2.0
+    window_size: 10
+  yoto:
+    alpha: 0.5
+    beta: 0.5
+  adaptive_curriculum:
+    initial_weights:
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    adaptation_rate: 0.1
+adversarial:
+  enable: false
+  discriminator_learning_rate: 1.0e-05
+  discriminator_update_frequency: 1
+discriminator:
+  enable: false
+  conv_layers:
+    conv1:
+    - null
+    - 32
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv2:
+    - 32
+    - 64
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv3:
+    - 64
+    - 128
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 2
+    - - 1
+      - 1
+      - 1
+    conv4:
+    - 128
+    - 256
+    - - 3
+      - 3
+      - 3
+    - - 2
+      - 2
+      - 1
+    - - 1
+      - 1
+      - 0
+  final_layers:
+    hidden_dim: 512
+    dropout: 0.3
+  learning_rate: 0.0002
+  update_ratio: 1
+  label_smoothing: 0.1
+testing:
+  num_tsteps: 30
+  test_batch_size: 16
+  visualization:
+    default_layer: null
+    default_timestep: 0
+    default_case: 0
+    default_observation: 0
+    show_metrics: true
+    show_comparison: true
+    show_well_locations: true
+    enable_masking: false
+    mask_file_path: sr3_batch_output/inactive_cell_locations.h5
+  metrics:
+    compute_r2: true
+    compute_rmse: true
+    compute_mae: true
+    compute_ape: true
+    filter_negative_predictions: true
+    epsilon_auto_calculate: true
+validation:
+  eval_frequency: 1
+  test_batch_size: 16
+  save_predictions: false
+paths:
+  output_dir: ./saved_models/
+  data_dir: sr3_batch_output/
+  processed_data_dir: ./processed_data/
+  model_dir: ./saved_models/
+  model_prefix: e2co
+  file_extension: .h5
+  normalization_params_dir: ./processed_data/
+runtime:
+  device: auto
+  print_interval: 5000
+  save_best_model: true
+  best_model_criterion: total_loss
+  verbose: false
+  detailed_loss_logging:
+    enable: true
+    frequency: final_only
+    epoch_interval: 20
+    batch_interval: 10
+    include_evaluation: true
+    include_lr_info: true
+  wandb:
+    enable: true
+    project: ROM-E2C
+    entity: null
+    name: null
+    tags: []
+    notes: ''
+    config_file: config.yaml
+experiment:
+  seed: 42
+  gradient_clip: 0.0
+  early_stopping_patience: 50
+data_preprocessing_processing: *id001
+data_preprocessing_normalization: *id002

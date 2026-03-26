@@ -1,0 +1,1868 @@
+"""
+Optimizer Configuration Dashboard
+==================================
+
+Interactive dashboard for configuring classical optimization methods.
+Allows selection of ROM model, initial states, optimizer type, and parameters.
+
+Similar structure to RL configuration dashboard but focused on optimization settings.
+"""
+
+import os
+import re
+import json
+import torch
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+
+try:
+    import ipywidgets as widgets
+    from IPython.display import display, clear_output, HTML
+    WIDGETS_AVAILABLE = True
+except ImportError:
+    WIDGETS_AVAILABLE = False
+    print("Warning: ipywidgets not available. Dashboard functionality disabled.")
+
+# Import ROM and config utilities
+try:
+    import sys
+    project_root = Path(__file__).parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
+    from ROM_Refactored.model.training.rom_wrapper import ROMWithE2C
+    from ROM_Refactored.utilities.config_loader import Config
+    ROM_AVAILABLE = True
+except ImportError:
+    ROM_AVAILABLE = False
+    ROMWithE2C = None
+    Config = None
+
+
+def auto_detect_action_ranges_from_h5(data_dir=None):
+    """
+    Automatically detect Gas Injection and Producer BHP ranges from H5 files.
+    Same logic as RL configuration dashboard for consistency.
+    
+    Args:
+        data_dir: Directory containing H5 files (sr3_batch_output)
+        
+    Returns:
+        dict with detected ranges and detection status
+    """
+    import h5py
+    
+    # Default data directory
+    if data_dir is None:
+        data_dir = str(Path(__file__).parent.parent.parent / 'ROM_Refactored' / 'sr3_batch_output')
+    
+    # Default fallback values (same as RL dashboard)
+    detected_ranges = {
+        'gas_inj_min': 24720290.0,
+        'gas_inj_max': 100646896.0,
+        'bhp_min': 1087.78,
+        'bhp_max': 1305.34,
+        'detection_successful': False,
+        'detection_details': {}
+    }
+    
+    if not os.path.exists(data_dir):
+        return detected_ranges
+    
+    try:
+        # Detect Gas Injection ranges from timeseries data
+        gas_file = os.path.join(data_dir, 'batch_timeseries_data_GIWELL.h5')
+        if os.path.exists(gas_file):
+            with h5py.File(gas_file, 'r') as f:
+                gas_data = f['data'][:]
+                # GIWELL data: first 3 wells are injectors
+                if gas_data.shape[2] >= 3:
+                    injector_gas = gas_data[:, :, :3]
+                    gas_min = np.min(injector_gas)
+                    gas_max = np.max(injector_gas)
+                    
+                    detected_ranges['gas_inj_min'] = float(gas_min)
+                    detected_ranges['gas_inj_max'] = float(gas_max)
+                    detected_ranges['detection_details']['gas'] = {
+                        'min': float(gas_min),
+                        'max': float(gas_max),
+                        'source': 'batch_timeseries_data_GIWELL.h5'
+                    }
+        
+        # Detect BHP ranges from timeseries data
+        bhp_file = os.path.join(data_dir, 'batch_timeseries_data_BHP.h5')
+        if os.path.exists(bhp_file):
+            with h5py.File(bhp_file, 'r') as f:
+                bhp_data = f['data'][:]
+                # BHP data: last 3 wells (indices 3,4,5) are producers
+                if bhp_data.shape[2] >= 6:
+                    producer_bhp = bhp_data[:, :, 3:6]
+                    bhp_min = np.min(producer_bhp)
+                    bhp_max = np.max(producer_bhp)
+                    
+                    detected_ranges['bhp_min'] = float(bhp_min)
+                    detected_ranges['bhp_max'] = float(bhp_max)
+                    detected_ranges['detection_details']['bhp'] = {
+                        'min': float(bhp_min),
+                        'max': float(bhp_max),
+                        'source': 'batch_timeseries_data_BHP.h5'
+                    }
+        
+        # Check if detection was successful
+        if 'gas' in detected_ranges['detection_details'] or 'bhp' in detected_ranges['detection_details']:
+            detected_ranges['detection_successful'] = True
+            
+    except Exception as e:
+        print(f"⚠️ Auto-detection warning: {e}")
+    
+    return detected_ranges
+
+
+class OptimizerConfigDashboard:
+    """
+    Interactive dashboard for optimizer configuration.
+    
+    Provides tabs for:
+    1. ROM Model Selection
+    2. Initial States Selection
+    3. Optimizer Selection & Parameters
+    4. Control Bounds Configuration
+    5. Economic Parameters
+    """
+    
+    # Available optimizer types
+    OPTIMIZER_TYPES = {
+        'LS-SQP-StoSAG': {
+            'name': 'LS-SQP with StoSAG',
+            'description': 'Line-Search SQP with Stochastic Simplex Approximate Gradients (gradient-based)',
+            'params': {
+                'gradient_type': {'type': 'dropdown', 'default': 'spsa', 
+                                  'options': [
+                                      ('SPSA (Fast - 2 evals/sample)', 'spsa'),
+                                      ('StoSAG (Accurate - N evals)', 'stosag'),
+                                      ('Forward FD (N evals)', 'fd_forward'),
+                                      ('Central FD (2N evals)', 'fd_central')
+                                  ],
+                                  'description': 'Gradient estimation method'},
+                'perturbation_size': {'type': 'float', 'default': 0.01, 'min': 0.001, 'max': 0.1,
+                                      'description': 'Relative perturbation for gradient estimation'},
+                'spsa_num_samples': {'type': 'int', 'default': 5, 'min': 1, 'max': 20,
+                                     'description': 'SPSA samples to average (more = accurate, slower)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 1000,
+                                   'description': 'Maximum optimization iterations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'Differential-Evolution': {
+            'name': 'Differential Evolution',
+            'description': 'Global optimization using population-based search (derivative-free)',
+            'params': {
+                'popsize': {'type': 'int', 'default': 15, 'min': 5, 'max': 50,
+                           'description': 'Population size multiplier'},
+                'mutation': {'type': 'float', 'default': 0.8, 'min': 0.1, 'max': 2.0,
+                            'description': 'Mutation constant (F)'},
+                'recombination': {'type': 'float', 'default': 0.7, 'min': 0.0, 'max': 1.0,
+                                  'description': 'Crossover probability (CR)'},
+                'strategy': {'type': 'dropdown', 'default': 'best1bin',
+                            'options': [
+                                ('best1bin (fast convergence)', 'best1bin'),
+                                ('best2bin (more exploration)', 'best2bin'),
+                                ('rand1bin (most exploration)', 'rand1bin'),
+                                ('currenttobest1bin (balanced)', 'currenttobest1bin')
+                            ],
+                            'description': 'DE strategy'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'Dual-Annealing': {
+            'name': 'Dual Annealing',
+            'description': 'Simulated annealing with local search refinement (derivative-free)',
+            'params': {
+                'initial_temp': {'type': 'float', 'default': 5230.0, 'min': 100.0, 'max': 50000.0,
+                                'description': 'Initial temperature'},
+                'restart_temp_ratio': {'type': 'float', 'default': 2e-5, 'min': 1e-6, 'max': 1e-3,
+                                       'description': 'Restart temperature ratio'},
+                'visit': {'type': 'float', 'default': 2.62, 'min': 1.0, 'max': 3.0,
+                         'description': 'Visiting distribution parameter'},
+                'accept': {'type': 'float', 'default': -5.0, 'min': -10.0, 'max': -1.0,
+                          'description': 'Acceptance distribution parameter'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 1000,
+                                   'description': 'Maximum iterations'}
+            }
+        },
+        'Basin-Hopping': {
+            'name': 'Basin Hopping',
+            'description': 'Monte Carlo + local optimization (finds global minima)',
+            'params': {
+                'niter': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                         'description': 'Number of basin hopping iterations'},
+                'T': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 10.0,
+                     'description': 'Temperature for Metropolis criterion'},
+                'stepsize': {'type': 'float', 'default': 0.5, 'min': 0.1, 'max': 1.0,
+                            'description': 'Initial step size for random displacement'}
+            }
+        },
+        'CMA-ES': {
+            'name': 'CMA-ES',
+            'description': 'Covariance Matrix Adaptation Evolution Strategy (state-of-the-art)',
+            'params': {
+                'sigma0': {'type': 'float', 'default': 0.3, 'min': 0.1, 'max': 0.5,
+                          'description': 'Initial step size (sigma)'},
+                'popsize': {'type': 'int', 'default': 0, 'min': 0, 'max': 200,
+                           'description': 'Population size (0 = automatic)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'PSO': {
+            'name': 'Particle Swarm Optimization',
+            'description': 'Population-based swarm intelligence optimizer (derivative-free)',
+            'params': {
+                'n_particles': {'type': 'int', 'default': 30, 'min': 10, 'max': 100,
+                               'description': 'Number of particles in swarm'},
+                'c1': {'type': 'float', 'default': 2.0, 'min': 0.5, 'max': 4.0,
+                      'description': 'Cognitive parameter (personal best attraction)'},
+                'c2': {'type': 'float', 'default': 2.0, 'min': 0.5, 'max': 4.0,
+                      'description': 'Social parameter (global best attraction)'},
+                'w': {'type': 'float', 'default': 0.7, 'min': 0.1, 'max': 1.0,
+                     'description': 'Inertia weight (momentum)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum iterations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'GA': {
+            'name': 'Genetic Algorithm',
+            'description': 'Evolutionary optimization with selection, crossover, mutation',
+            'params': {
+                'population_size': {'type': 'int', 'default': 50, 'min': 20, 'max': 200,
+                                   'description': 'Number of individuals in population'},
+                'crossover_prob': {'type': 'float', 'default': 0.7, 'min': 0.0, 'max': 1.0,
+                                  'description': 'Crossover probability'},
+                'mutation_prob': {'type': 'float', 'default': 0.2, 'min': 0.01, 'max': 0.5,
+                                 'description': 'Mutation probability per gene'},
+                'elitism': {'type': 'int', 'default': 2, 'min': 0, 'max': 10,
+                           'description': 'Number of elite individuals to preserve'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum generations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'L-BFGS-B': {
+            'name': 'L-BFGS-B',
+            'description': 'Quasi-Newton method with limited-memory Hessian approximation (gradient-based)',
+            'params': {
+                'gradient_type': {'type': 'dropdown', 'default': 'spsa',
+                                  'options': [
+                                      ('SPSA (Fast - 2 evals/sample)', 'spsa'),
+                                      ('StoSAG (Accurate - N evals)', 'stosag'),
+                                      ('Forward FD (N evals)', 'fd_forward'),
+                                      ('Central FD (2N evals)', 'fd_central')
+                                  ],
+                                  'description': 'Gradient estimation method'},
+                'perturbation_size': {'type': 'float', 'default': 0.01, 'min': 0.001, 'max': 0.1,
+                                      'description': 'Relative perturbation for gradient estimation'},
+                'spsa_num_samples': {'type': 'int', 'default': 5, 'min': 1, 'max': 20,
+                                     'description': 'SPSA samples to average'},
+                'maxcor': {'type': 'int', 'default': 10, 'min': 5, 'max': 30,
+                           'description': 'Limited-memory corrections (Hessian approximation depth)'},
+                'max_iterations': {'type': 'int', 'default': 100, 'min': 10, 'max': 500,
+                                   'description': 'Maximum iterations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        },
+        'Adam': {
+            'name': 'Adam',
+            'description': 'Adaptive Moment Estimation with per-variable learning rates (gradient-based)',
+            'params': {
+                'gradient_type': {'type': 'dropdown', 'default': 'spsa',
+                                  'options': [
+                                      ('SPSA (Fast - 2 evals/sample)', 'spsa'),
+                                      ('StoSAG (Accurate - N evals)', 'stosag'),
+                                      ('Forward FD (N evals)', 'fd_forward'),
+                                      ('Central FD (2N evals)', 'fd_central')
+                                  ],
+                                  'description': 'Gradient estimation method'},
+                'perturbation_size': {'type': 'float', 'default': 0.01, 'min': 0.001, 'max': 0.1,
+                                      'description': 'Relative perturbation for gradient estimation'},
+                'spsa_num_samples': {'type': 'int', 'default': 5, 'min': 1, 'max': 20,
+                                     'description': 'SPSA samples to average'},
+                'learning_rate': {'type': 'float', 'default': 0.01, 'min': 0.001, 'max': 0.1,
+                                  'description': 'Step size alpha'},
+                'beta1': {'type': 'float', 'default': 0.9, 'min': 0.5, 'max': 0.999,
+                          'description': 'First moment decay rate (momentum)'},
+                'beta2': {'type': 'float', 'default': 0.999, 'min': 0.9, 'max': 0.9999,
+                          'description': 'Second moment decay rate'},
+                'max_iterations': {'type': 'int', 'default': 200, 'min': 50, 'max': 1000,
+                                   'description': 'Maximum iterations'},
+                'tolerance': {'type': 'float', 'default': 1e-6, 'min': 1e-10, 'max': 1e-2,
+                             'description': 'Convergence tolerance'}
+            }
+        }
+    }
+    
+    def __init__(self, config_path: str = 'config.yaml'):
+        """
+        Initialize optimizer configuration dashboard.
+        
+        Args:
+            config_path: Path to RL config file for shared parameters
+        """
+        if not WIDGETS_AVAILABLE:
+            raise ImportError("ipywidgets required for dashboard. Install with: pip install ipywidgets")
+        
+        # Load configuration — resolve to ROM_Refactored/config.yaml
+        self.config_path = Path(__file__).parent / config_path
+        if not self.config_path.exists():
+            self.config_path = Path(__file__).parent.parent / config_path
+        if not self.config_path.exists():
+            self.config_path = Path(__file__).parent.parent.parent / 'ROM_Refactored' / config_path
+        
+        if self.config_path.exists():
+            self.config = Config(str(self.config_path))
+        else:
+            print(f"Warning: Config file not found at {self.config_path}")
+            self.config = None
+        
+        # Initialize paths
+        self.rom_folder = str(Path(__file__).parent.parent.parent / 'ROM_Refactored' / 'saved_models')
+        self.state_folder = str(Path(__file__).parent.parent.parent / 'ROM_Refactored' / 'sr3_batch_output')
+        
+        # Storage for selections
+        self.optimizer_config = {
+            'rom_models': [],
+            'selected_rom': None,
+            'available_states': [],
+            'selected_states': ['SW', 'SG', 'PRES'],
+            'optimizer_type': 'LS-SQP-StoSAG',
+            'init_strategy': 'midpoint',
+            'optimizer_params': {},
+            'action_ranges': {},
+            'economic_params': {},
+            'num_steps': 30,
+            'config': self.config,
+            'norm_params': {},
+            'device': None,
+            'rom_model': None,
+            'z0_options': None
+        }
+        
+        # Loaded model storage
+        self.loaded_rom_model = None
+        self.generated_z0_options = None
+        self.device = None
+        
+        # Create dashboard
+        self._create_dashboard()
+    
+    def _create_dashboard(self):
+        """Create the main dashboard interface."""
+        # Header
+        header = widgets.HTML("""
+        <div style="background: linear-gradient(135deg, #1a5f7a 0%, #159895 100%); 
+                    padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+            <h2 style="color: white; margin: 0;">Classical Optimizer Configuration</h2>
+            <p style="color: #e0e0e0; margin: 5px 0 0 0;">
+                Configure ROM model, initial states, and optimization parameters
+            </p>
+        </div>
+        """)
+        
+        # Create tabs
+        self.rom_tab = widgets.VBox([])
+        self.states_tab = widgets.VBox([])
+        self.optimizer_tab = widgets.VBox([])
+        self.bounds_tab = widgets.VBox([])
+        self.economics_tab = widgets.VBox([])
+        
+        tabs = widgets.Tab(children=[
+            self.rom_tab,
+            self.states_tab, 
+            self.optimizer_tab,
+            self.bounds_tab,
+            self.economics_tab
+        ])
+        tabs.set_title(0, '🧠 ROM Model')
+        tabs.set_title(1, '🏔️ Initial States')
+        tabs.set_title(2, '⚙️ Optimizer')
+        tabs.set_title(3, '📊 Control Bounds')
+        tabs.set_title(4, '💰 Economics')
+        
+        # Apply button
+        self.apply_button = widgets.Button(
+            description='🚀 Apply Configuration & Load Model',
+            button_style='success',
+            layout=widgets.Layout(width='300px', height='40px')
+        )
+        self.apply_button.on_click(self._on_apply)
+        
+        # Output area
+        self.output = widgets.Output()
+        
+        # Assemble dashboard
+        self.dashboard = widgets.VBox([
+            header,
+            tabs,
+            widgets.HBox([self.apply_button], layout=widgets.Layout(justify_content='center')),
+            self.output
+        ])
+        
+        # Populate tabs
+        self._populate_rom_tab()
+        self._populate_states_tab()
+        self._populate_optimizer_tab()
+        self._populate_bounds_tab()
+        self._populate_economics_tab()
+        
+        # Initial scan
+        self._scan_rom_models()
+        self._scan_available_states()
+    
+    def _populate_rom_tab(self):
+        """Populate ROM model selection tab."""
+        # ROM folder input
+        self.rom_folder_input = widgets.Text(
+            value=self.rom_folder,
+            description='ROM Folder:',
+            layout=widgets.Layout(width='80%'),
+            style={'description_width': '100px'}
+        )
+        
+        # Scan button
+        scan_button = widgets.Button(description='🔍 Scan', button_style='info')
+        scan_button.on_click(lambda b: self._scan_rom_models())
+        
+        # ROM model dropdown
+        self.rom_dropdown = widgets.Dropdown(
+            options=[],
+            description='Select ROM:',
+            layout=widgets.Layout(width='80%'),
+            style={'description_width': '100px'}
+        )
+        
+        # Model info display
+        self.model_info_html = widgets.HTML(value="<p>No model selected</p>")
+        
+        self.rom_tab.children = [
+            widgets.HTML("<h3>🧠 ROM Model Selection</h3>"),
+            widgets.HBox([self.rom_folder_input, scan_button]),
+            self.rom_dropdown,
+            widgets.HTML("<h4>Model Information:</h4>"),
+            self.model_info_html
+        ]
+        
+        # Connect dropdown change
+        self.rom_dropdown.observe(self._on_rom_selected, names='value')
+    
+    def _populate_states_tab(self):
+        """Populate initial states selection tab."""
+        self.state_checkboxes = {}
+        self.known_states = ['SW', 'SG', 'PRES', 'PERMI', 'PERMJ', 'PERMK', 'POROS']
+        
+        state_widgets = [widgets.HTML("<h3>🏔️ Select States for Optimization</h3>")]
+        state_widgets.append(widgets.HTML(
+            "<p><i>Channels are auto-selected when you choose a ROM model.</i></p>"
+            "<p><i><b>ch2:</b> SG, PRES | <b>ch4:</b> SG, PRES, PERMI, POROS</i></p>"
+        ))
+        
+        # Default to ch2 (SG, PRES) - will be auto-updated when model is selected
+        for state in self.known_states:
+            cb = widgets.Checkbox(
+                value=state in ['SG', 'PRES'],  # Default for ch2 models
+                description=state,
+                disabled=False
+            )
+            self.state_checkboxes[state] = cb
+            state_widgets.append(cb)
+        
+        # Z0 Case Index Selection
+        state_widgets.append(widgets.HTML("<h4>Initial State (Z0) Selection:</h4>"))
+        state_widgets.append(widgets.HTML(
+            "<p><i>Select which case(s) to use as initial reservoir state.</i></p>"
+        ))
+        
+        # Checkbox to load all cases (for RL-like sampling)
+        self.load_all_cases_checkbox = widgets.Checkbox(
+            value=False,
+            description='Load ALL 1000 cases (for RL-like random sampling)',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='400px')
+        )
+        state_widgets.append(self.load_all_cases_checkbox)
+        
+        state_widgets.append(widgets.HTML(
+            "<p><i>Or select a single case:</i></p>"
+        ))
+        
+        self.z0_case_index_input = widgets.IntText(
+            value=0,
+            description='Case Index:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='200px')
+        )
+        self.z0_case_slider = widgets.IntSlider(
+            value=0,
+            min=0,
+            max=999,
+            step=1,
+            description='',
+            layout=widgets.Layout(width='400px')
+        )
+        # Link slider and text input
+        widgets.link((self.z0_case_index_input, 'value'), (self.z0_case_slider, 'value'))
+        state_widgets.append(widgets.HBox([self.z0_case_index_input, self.z0_case_slider]))
+        
+        # Number of timesteps
+        state_widgets.append(widgets.HTML("<h4>Simulation Length:</h4>"))
+        self.num_steps_input = widgets.IntSlider(
+            value=30,
+            min=10,
+            max=100,
+            step=5,
+            description='Timesteps:',
+            style={'description_width': '100px'}
+        )
+        state_widgets.append(self.num_steps_input)
+        
+        self.states_tab.children = state_widgets
+    
+    # Initialization strategies for all optimizers
+    INIT_STRATEGIES = {
+        'midpoint': 'Midpoint (0.5) - Center of control range',
+        'random': 'Random - Uniform random in [0,1]',
+        'low': 'Low (0.1) - 10% of range',
+        'naive_zero': 'Naive Zero - Minimum controls (0.0)',
+        'naive_max': 'Naive Max - Maximum controls (1.0)',
+        'naive_low_bhp_high_gas': 'Naive Low BHP + High Gas',
+        'naive_high_bhp_low_gas': 'Naive High BHP + Low Gas'
+    }
+    
+    def _populate_optimizer_tab(self):
+        """Populate optimizer selection and parameters tab."""
+
+        # ---- Optimization mode selector (Standard vs Hybrid) ----
+        self.optimization_mode_dropdown = widgets.Dropdown(
+            options=[('Standard (single optimizer)', 'standard'),
+                     ('Hybrid (global search + local refinement)', 'hybrid')],
+            value='standard',
+            description='Mode:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='60%')
+        )
+        self.optimization_mode_dropdown.observe(
+            lambda _: self._refresh_optimizer_tab_contents(), names='value')
+
+        # ---- Standard-mode widgets ----
+        optimizer_options = [(v['name'], k) for k, v in self.OPTIMIZER_TYPES.items()]
+        self.optimizer_type_dropdown = widgets.Dropdown(
+            options=optimizer_options,
+            value='LS-SQP-StoSAG',
+            description='Optimizer:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='50%')
+        )
+        init_options = [(v, k) for k, v in self.INIT_STRATEGIES.items()]
+        self.init_strategy_dropdown = widgets.Dropdown(
+            options=init_options,
+            value='midpoint',
+            description='Initialization:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='50%')
+        )
+        self.optimizer_params_box = widgets.VBox([])
+        self.optimizer_desc_html = widgets.HTML()
+
+        # ---- Hybrid-mode widgets ----
+        _sw = {'description_width': '120px'}
+        _lw = widgets.Layout(width='60%')
+
+        # Stage 1 source
+        stage1_options = [
+            ('RL Trained Policy', 'RL'),
+            ('PSO', 'PSO'), ('GA', 'GA'), ('CMA-ES', 'CMA-ES'),
+            ('Differential Evolution', 'Differential-Evolution'),
+            ('Dual Annealing', 'Dual-Annealing'),
+            ('Basin Hopping', 'Basin-Hopping'),
+        ]
+        self.hybrid_stage1_dropdown = widgets.Dropdown(
+            options=stage1_options, value='RL',
+            description='Stage 1:', style=_sw, layout=_lw)
+
+        # RL pkl file discovery
+        self.hybrid_rl_pkl_dropdown = widgets.Dropdown(
+            options=[], description='Results file:', style=_sw, layout=_lw)
+        self._refresh_rl_pkl_list()
+
+        self.hybrid_rl_refresh_btn = widgets.Button(
+            description='Refresh', layout=widgets.Layout(width='80px'))
+        self.hybrid_rl_refresh_btn.on_click(lambda _: self._refresh_rl_pkl_list())
+
+        # Stage 1 classical params (reuse mechanism)
+        self.hybrid_stage1_params_box = widgets.VBox([])
+        self.hybrid_stage1_param_inputs = {}
+
+        # Stage 2 (gradient-based only)
+        stage2_options = [
+            ('L-BFGS-B', 'L-BFGS-B'),
+            ('Adam', 'Adam'),
+            ('LS-SQP-StoSAG', 'LS-SQP-StoSAG'),
+        ]
+        self.hybrid_stage2_dropdown = widgets.Dropdown(
+            options=stage2_options, value='L-BFGS-B',
+            description='Stage 2:', style=_sw, layout=_lw)
+        self.hybrid_stage2_params_box = widgets.VBox([])
+        self.hybrid_stage2_param_inputs = {}
+
+        # Wire change handlers (non-recursive)
+        self.hybrid_stage1_dropdown.observe(
+            lambda _: self._on_hybrid_stage1_changed(), names='value')
+        self.hybrid_stage2_dropdown.observe(
+            lambda _: self._on_hybrid_stage2_changed(), names='value')
+
+        # ---- Container for dynamic content ----
+        self.optimizer_tab_dynamic = widgets.VBox([])
+
+        self.optimizer_tab.children = [
+            widgets.HTML("<h3>Optimizer Configuration</h3>"),
+            self.optimization_mode_dropdown,
+            self.optimizer_tab_dynamic,
+        ]
+
+        # Connect standard dropdown change
+        self.optimizer_type_dropdown.observe(self._on_optimizer_type_changed, names='value')
+
+        # Initial render
+        self._refresh_optimizer_tab_contents()
+
+    def _refresh_optimizer_tab_contents(self):
+        """Switch between Standard and Hybrid UI in the optimizer tab."""
+        mode = self.optimization_mode_dropdown.value
+
+        if mode == 'standard':
+            self._update_optimizer_params()
+            self.optimizer_tab_dynamic.children = [
+                self.optimizer_type_dropdown,
+                self.optimizer_desc_html,
+                widgets.HTML("<h4>Initialization Strategy:</h4>"),
+                self.init_strategy_dropdown,
+                widgets.HTML("<h4>Parameters:</h4>"),
+                self.optimizer_params_box,
+            ]
+        else:
+            self._build_hybrid_stage1_params()
+            self._update_hybrid_stage2_params()
+            self._rebuild_hybrid_layout()
+
+    def _rebuild_hybrid_layout(self):
+        """Assemble the hybrid tab layout from pre-built widgets."""
+        source = self.hybrid_stage1_dropdown.value
+        if source == 'RL':
+            stage1_detail = widgets.VBox([
+                widgets.HTML("<p><i>Select saved RL training results (.pkl)</i></p>"),
+                widgets.HBox([self.hybrid_rl_pkl_dropdown, self.hybrid_rl_refresh_btn]),
+            ])
+        else:
+            stage1_detail = widgets.VBox([
+                widgets.HTML(f"<p><i>{source} will run as Stage 1 before local refinement</i></p>"),
+                self.hybrid_stage1_params_box,
+            ])
+
+        self.optimizer_tab_dynamic.children = [
+            widgets.HTML("<h4>Stage 1 - Global Search</h4>"),
+            self.hybrid_stage1_dropdown,
+            stage1_detail,
+            widgets.HTML("<hr>"),
+            widgets.HTML("<h4>Stage 2 - Local Refinement (Gradient-Based)</h4>"),
+            self.hybrid_stage2_dropdown,
+            self.hybrid_stage2_params_box,
+        ]
+
+    def _build_hybrid_stage1_params(self):
+        """Build Stage 1 parameter widgets (no recursive re-render)."""
+        source = self.hybrid_stage1_dropdown.value
+        if source != 'RL' and source in self.OPTIMIZER_TYPES:
+            self._build_param_widgets_for(
+                source, self.hybrid_stage1_params_box, self.hybrid_stage1_param_inputs)
+        else:
+            self.hybrid_stage1_params_box.children = []
+            self.hybrid_stage1_param_inputs.clear()
+
+    def _on_hybrid_stage1_changed(self):
+        """Handle Stage 1 dropdown change without infinite recursion."""
+        self._build_hybrid_stage1_params()
+        if self.optimization_mode_dropdown.value == 'hybrid':
+            self._rebuild_hybrid_layout()
+
+    def _on_hybrid_stage2_changed(self):
+        """Handle Stage 2 dropdown change."""
+        self._update_hybrid_stage2_params()
+        if self.optimization_mode_dropdown.value == 'hybrid':
+            self._rebuild_hybrid_layout()
+
+    def _update_hybrid_stage2_params(self):
+        """Build Stage 2 parameter widgets."""
+        stage2_type = self.hybrid_stage2_dropdown.value
+        if stage2_type in self.OPTIMIZER_TYPES:
+            self._build_param_widgets_for(
+                stage2_type, self.hybrid_stage2_params_box, self.hybrid_stage2_param_inputs)
+        else:
+            self.hybrid_stage2_params_box.children = []
+            self.hybrid_stage2_param_inputs.clear()
+
+    def _build_param_widgets_for(self, opt_type, container, input_dict):
+        """Build parameter widgets for a given optimizer type into the given container."""
+        import numpy as _np
+        opt_info = self.OPTIMIZER_TYPES.get(opt_type, {})
+        param_widgets = []
+        input_dict.clear()
+        for param_name, param_info in opt_info.get('params', {}).items():
+            if param_info['type'] == 'int':
+                w = widgets.IntSlider(
+                    value=param_info['default'], min=param_info['min'], max=param_info['max'],
+                    description=param_name + ':', style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%'))
+            elif param_info['type'] == 'float':
+                w = widgets.FloatLogSlider(
+                    value=param_info['default'],
+                    min=_np.log10(param_info['min']), max=_np.log10(param_info['max']),
+                    description=param_name + ':', style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%'))
+            elif param_info['type'] == 'dropdown':
+                w = widgets.Dropdown(
+                    options=param_info['options'], value=param_info['default'],
+                    description=param_name + ':', style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%'))
+            else:
+                continue
+            param_widgets.append(w)
+            param_widgets.append(widgets.HTML(
+                f"<p style='margin-left:150px; color:gray;'><small>{param_info['description']}</small></p>"))
+            input_dict[param_name] = w
+        container.children = param_widgets
+
+    def _refresh_rl_pkl_list(self):
+        """Discover .pkl files in training_results/ for the hybrid RL dropdown."""
+        from pathlib import Path as _Path
+        rl_dir = _Path(__file__).resolve().parent.parent
+        results_dir = rl_dir / 'training_results'
+        pkl_files = sorted(results_dir.glob('rl_training_results_*.pkl'),
+                           key=lambda p: p.stat().st_mtime, reverse=True) if results_dir.exists() else []
+        if pkl_files:
+            options = [(f.name, str(f)) for f in pkl_files]
+        else:
+            options = [('No results found', '')]
+        self.hybrid_rl_pkl_dropdown.options = options
+        if options:
+            self.hybrid_rl_pkl_dropdown.value = options[0][1]
+    
+    def _populate_bounds_tab(self):
+        """Populate control bounds configuration tab."""
+        self.bounds_widgets = {}
+        
+        # Auto-detect ranges from H5 files (same as RL dashboard)
+        detected_ranges = auto_detect_action_ranges_from_h5(data_dir=self.state_folder)
+        
+        bhp_min = detected_ranges['bhp_min']
+        bhp_max = detected_ranges['bhp_max']
+        gas_min = detected_ranges['gas_inj_min']
+        gas_max = detected_ranges['gas_inj_max']
+        
+        if detected_ranges['detection_successful']:
+            source_text = "<p style='color: green;'>✅ Ranges auto-detected from H5 files (same as RL Dashboard)</p>"
+            details = detected_ranges['detection_details']
+            if 'bhp' in details:
+                source_text += f"<p>&nbsp;&nbsp;&nbsp;BHP: [{details['bhp']['min']:.2f}, {details['bhp']['max']:.2f}] psi from {details['bhp']['source']}</p>"
+            if 'gas' in details:
+                source_text += f"<p>&nbsp;&nbsp;&nbsp;Gas: [{details['gas']['min']:.0f}, {details['gas']['max']:.0f}] ft³/day from {details['gas']['source']}</p>"
+        else:
+            source_text = "<p style='color: orange;'>⚠️ Using fallback ranges (H5 files not found)</p>"
+        
+        bounds_content = [
+            widgets.HTML("<h3>📊 Control Bounds Configuration</h3>"),
+            widgets.HTML("<p><i>Control ranges matching RL action space.</i></p>"),
+            widgets.HTML(source_text),
+            widgets.HTML("<h4>Producer BHP (psi):</h4>")
+        ]
+        
+        # Producer BHP bounds
+        self.bhp_min_input = widgets.FloatText(
+            value=bhp_min,
+            description='Min BHP:',
+            style={'description_width': '80px'}
+        )
+        self.bhp_max_input = widgets.FloatText(
+            value=bhp_max,
+            description='Max BHP:',
+            style={'description_width': '80px'}
+        )
+        bounds_content.append(widgets.HBox([self.bhp_min_input, self.bhp_max_input]))
+        
+        bounds_content.append(widgets.HTML("<h4>Gas Injection Rate (ft³/day):</h4>"))
+        
+        # Gas injection bounds
+        self.gas_min_input = widgets.FloatText(
+            value=gas_min,
+            description='Min Gas:',
+            style={'description_width': '80px'}
+        )
+        self.gas_max_input = widgets.FloatText(
+            value=gas_max,
+            description='Max Gas:',
+            style={'description_width': '80px'}
+        )
+        bounds_content.append(widgets.HBox([self.gas_min_input, self.gas_max_input]))
+        
+        # Refresh button to re-detect from H5 files
+        refresh_btn = widgets.Button(description='🔄 Re-detect from H5 Files', button_style='info')
+        refresh_btn.on_click(lambda b: self._refresh_bounds_from_h5())
+        bounds_content.append(refresh_btn)
+        
+        self.bounds_tab.children = bounds_content
+    
+    def _refresh_bounds_from_h5(self):
+        """Refresh control bounds from H5 files."""
+        detected_ranges = auto_detect_action_ranges_from_h5(data_dir=self.state_folder)
+        
+        if detected_ranges['detection_successful']:
+            self.bhp_min_input.value = detected_ranges['bhp_min']
+            self.bhp_max_input.value = detected_ranges['bhp_max']
+            self.gas_min_input.value = detected_ranges['gas_inj_min']
+            self.gas_max_input.value = detected_ranges['gas_inj_max']
+            print("✅ Control bounds refreshed from H5 files")
+            print(f"   BHP: [{detected_ranges['bhp_min']:.2f}, {detected_ranges['bhp_max']:.2f}] psi")
+            print(f"   Gas: [{detected_ranges['gas_inj_min']:.0f}, {detected_ranges['gas_inj_max']:.0f}] ft³/day")
+        else:
+            print("⚠️ H5 files not found. Using current values.")
+    
+    def _populate_economics_tab(self):
+        """Populate economic parameters tab."""
+        econ_content = [
+            widgets.HTML("<h3>💰 Economic Parameters</h3>"),
+            widgets.HTML("<p><i>Configure economic values for NPV calculation.</i></p>"),
+            widgets.HTML("<h4>Gas Economics ($/ton):</h4>")
+        ]
+        
+        # Get defaults from config if available
+        if self.config and hasattr(self.config, 'rl_model'):
+            econ_config = self.config.rl_model.get('economics', {})
+            prices = econ_config.get('prices', {})
+            default_gas_rev = prices.get('gas_injection_revenue', 50.0)
+            default_gas_cost = prices.get('gas_injection_cost', 10.0)
+            default_water_pen = prices.get('water_production_penalty', 5.0)
+            default_gas_pen = prices.get('gas_production_penalty', 50.0)
+            default_scale = econ_config.get('scale_factor', 1000000.0)
+        else:
+            default_gas_rev = 50.0
+            default_gas_cost = 10.0
+            default_water_pen = 5.0
+            default_gas_pen = 50.0
+            default_scale = 1000000.0
+        
+        self.gas_revenue_input = widgets.FloatText(
+            value=default_gas_rev,
+            description='Gas Inj Revenue:',
+            style={'description_width': '120px'}
+        )
+        self.gas_cost_input = widgets.FloatText(
+            value=default_gas_cost,
+            description='Gas Inj Cost:',
+            style={'description_width': '120px'}
+        )
+        econ_content.append(widgets.HBox([self.gas_revenue_input, self.gas_cost_input]))
+        
+        econ_content.append(widgets.HTML("<h4>Penalties:</h4>"))
+        
+        self.water_penalty_input = widgets.FloatText(
+            value=default_water_pen,
+            description='Water Penalty ($/bbl):',
+            style={'description_width': '150px'}
+        )
+        self.gas_penalty_input = widgets.FloatText(
+            value=default_gas_pen,
+            description='Gas Prod Penalty ($/ton):',
+            style={'description_width': '150px'}
+        )
+        econ_content.append(widgets.HBox([self.water_penalty_input, self.gas_penalty_input]))
+        
+        econ_content.append(widgets.HTML("<h4>Scaling:</h4>"))
+        self.scale_factor_input = widgets.FloatText(
+            value=default_scale,
+            description='Scale Factor:',
+            style={'description_width': '100px'}
+        )
+        econ_content.append(self.scale_factor_input)
+
+        econ_content.append(widgets.HTML("<hr><h4>🔬 ROM Prediction Mode</h4>"))
+        self.prediction_mode_radio = widgets.RadioButtons(
+            options=[
+                ('State-based (Default - Spatial encode/decode cycle)', 'state_based'),
+                ('Latent-based (Faster - Pure latent evolution)', 'latent_based')
+            ],
+            value='state_based',
+            description='Mode:',
+            style={'description_width': '60px'},
+            layout=widgets.Layout(width='500px')
+        )
+        econ_content.append(self.prediction_mode_radio)
+        econ_content.append(widgets.HTML(
+            "<p><i><b>State-based:</b> Spatial→Latent→Spatial cycle (same as training). "
+            "<b>Latent-based:</b> Pure latent evolution (faster, tests transition quality).</i></p>"
+        ))
+        
+        self.economics_tab.children = econ_content
+    
+    def _scan_rom_models(self):
+        """Scan for available ROM models."""
+        self.rom_folder = self.rom_folder_input.value
+        self.optimizer_config['rom_models'] = []
+        
+        if not os.path.exists(self.rom_folder):
+            print(f"❌ ROM folder not found: {self.rom_folder}")
+            self.rom_dropdown.options = []
+            return
+        
+        # Look for model triplets (encoder, decoder, transition)
+        models = {}
+        
+        for filename in os.listdir(self.rom_folder):
+            if not filename.endswith('.h5'):
+                continue
+            
+            if 'encoder' in filename:
+                base_name = filename.replace('encoder', 'MODEL')
+                encoder_file = os.path.join(self.rom_folder, filename)
+                decoder_file = os.path.join(self.rom_folder, filename.replace('encoder', 'decoder'))
+                transition_file = os.path.join(self.rom_folder, filename.replace('encoder', 'transition'))
+                
+                if os.path.exists(decoder_file) and os.path.exists(transition_file):
+                    model_info = self._parse_model_filename(filename)
+                    display_name = self._create_model_display_name(filename, model_info)
+                    
+                    models[base_name] = {
+                        'name': display_name,
+                        'encoder': encoder_file,
+                        'decoder': decoder_file,
+                        'transition': transition_file,
+                        'info': model_info
+                    }
+        
+        self.optimizer_config['rom_models'] = list(models.values())
+        
+        # Update dropdown
+        options = [(m['name'], i) for i, m in enumerate(self.optimizer_config['rom_models'])]
+        self.rom_dropdown.options = options if options else [('No models found', -1)]
+        
+        print(f"✅ Found {len(models)} ROM model(s)")
+    
+    def _parse_model_filename(self, filename: str) -> Dict:
+        """Parse model filename to extract configuration info."""
+        info = {}
+        
+        patterns = {
+            'latent_dim': r'ld(\d+)',
+            'batch_size': r'bs(\d+)',
+            'nsteps': r'ns(\d+)',
+            'channels': r'ch(\d+)',
+            'run': r'run(\d+)',
+            'residual_blocks': r'_rb(\d+)',
+        }
+        
+        for param, pattern in patterns.items():
+            match = re.search(pattern, filename)
+            if match:
+                info[param] = int(match.group(1))
+        
+        # Extract encoder_hidden_dims
+        ehd_match = re.search(r'_ehd([\d-]+)', filename)
+        if ehd_match:
+            try:
+                info['encoder_hidden_dims'] = [int(d) for d in ehd_match.group(1).split('-')]
+            except:
+                pass
+        
+        # Detect multimodal flag (mmT = enabled, mmF = disabled)
+        if '_mmT' in filename:
+            info['multimodal'] = True
+        elif '_mmF' in filename:
+            info['multimodal'] = False
+        
+        # Detect normalization type
+        norm_match = re.search(r'_norm(ba|gd)', filename)
+        if norm_match:
+            info['norm_type'] = 'batchnorm' if norm_match.group(1) == 'ba' else 'gdn'
+        
+        # Detect transition type (trnCLRU, trnFNO, etc.)
+        trn_match = re.search(r'_trn([A-Z]+)', filename)
+        if trn_match:
+            info['transition_type'] = trn_match.group(1).lower()
+        
+        return info
+    
+    def _create_model_display_name(self, filename: str, info: Dict) -> str:
+        """Create display name for model."""
+        parts = []
+        if 'batch_size' in info:
+            parts.append(f"bs={info['batch_size']}")
+        if 'latent_dim' in info:
+            parts.append(f"ld={info['latent_dim']}")
+        if 'run' in info:
+            parts.append(f"run={info['run']}")
+        
+        if parts:
+            return f"Model ({', '.join(parts)})"
+        return filename
+    
+    def _scan_available_states(self):
+        """Scan for available state data files."""
+        if not os.path.exists(self.state_folder):
+            return
+        
+        available = []
+        for state in self.known_states:
+            state_file = os.path.join(self.state_folder, f'batch_spatial_properties_{state}.h5')
+            if os.path.exists(state_file):
+                available.append(state)
+                if state in self.state_checkboxes:
+                    self.state_checkboxes[state].disabled = False
+            else:
+                if state in self.state_checkboxes:
+                    self.state_checkboxes[state].disabled = True
+                    self.state_checkboxes[state].value = False
+        
+        self.optimizer_config['available_states'] = available
+    
+    def _on_rom_selected(self, change):
+        """Handle ROM model selection."""
+        idx = change['new']
+        if idx >= 0 and idx < len(self.optimizer_config['rom_models']):
+            model = self.optimizer_config['rom_models'][idx]
+            self.optimizer_config['selected_rom'] = model
+            
+            # Auto-select channels based on model's number of channels
+            num_channels = model['info'].get('channels', 2)
+            self._auto_select_channels(num_channels)
+            
+            # Update info display
+            info_html = f"""
+            <table style="width:100%">
+                <tr><td><b>Encoder:</b></td><td>{os.path.basename(model['encoder'])}</td></tr>
+                <tr><td><b>Decoder:</b></td><td>{os.path.basename(model['decoder'])}</td></tr>
+                <tr><td><b>Transition:</b></td><td>{os.path.basename(model['transition'])}</td></tr>
+            """
+            for key, val in model['info'].items():
+                info_html += f"<tr><td><b>{key}:</b></td><td>{val}</td></tr>"
+            info_html += "</table>"
+            
+            # Add channel selection info
+            info_html += f"<p style='color: green;'>✅ Auto-selected {num_channels} channels for this model</p>"
+            
+            self.model_info_html.value = info_html
+    
+    def _auto_select_channels(self, num_channels: int):
+        """
+        Auto-select channels based on model's number of channels.
+        
+        Channel mappings:
+        - ch2: SG, PRES
+        - ch4: SG, PRES, PERMI, POROS
+        - ch7: All channels
+        """
+        # Define channel sets for different model configurations
+        channel_configs = {
+            2: ['SG', 'PRES'],
+            3: ['SG', 'PRES', 'SW'],
+            4: ['SG', 'PRES', 'PERMI', 'POROS'],
+            5: ['SG', 'PRES', 'PERMI', 'POROS', 'SW'],
+            6: ['SG', 'PRES', 'PERMI', 'PERMJ', 'PERMK', 'POROS'],
+            7: ['SW', 'SG', 'PRES', 'PERMI', 'PERMJ', 'PERMK', 'POROS'],
+        }
+        
+        # Get the appropriate channels for this model
+        selected_channels = channel_configs.get(num_channels, ['SG', 'PRES'])
+        
+        # Update checkboxes
+        for state, checkbox in self.state_checkboxes.items():
+            if state in selected_channels:
+                checkbox.value = True
+            else:
+                checkbox.value = False
+        
+        print(f"   📊 Auto-selected channels for {num_channels}-channel model: {selected_channels}")
+    
+    def _on_optimizer_type_changed(self, change):
+        """Handle optimizer type change."""
+        self._update_optimizer_params()
+    
+    def _update_optimizer_params(self):
+        """Update optimizer parameters widget based on selected type."""
+        opt_type = self.optimizer_type_dropdown.value
+        opt_info = self.OPTIMIZER_TYPES.get(opt_type, {})
+        
+        # Update description
+        self.optimizer_desc_html.value = f"<p><i>{opt_info.get('description', '')}</i></p>"
+        
+        # Create parameter widgets
+        param_widgets = []
+        self.param_inputs = {}
+        
+        for param_name, param_info in opt_info.get('params', {}).items():
+            if param_info['type'] == 'int':
+                widget = widgets.IntSlider(
+                    value=param_info['default'],
+                    min=param_info['min'],
+                    max=param_info['max'],
+                    description=param_name + ':',
+                    style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%')
+                )
+            elif param_info['type'] == 'float':
+                widget = widgets.FloatLogSlider(
+                    value=param_info['default'],
+                    min=np.log10(param_info['min']),
+                    max=np.log10(param_info['max']),
+                    description=param_name + ':',
+                    style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%')
+                )
+            elif param_info['type'] == 'dropdown':
+                widget = widgets.Dropdown(
+                    options=param_info['options'],
+                    value=param_info['default'],
+                    description=param_name + ':',
+                    style={'description_width': '150px'},
+                    layout=widgets.Layout(width='80%')
+                )
+            else:
+                continue
+            
+            param_widgets.append(widget)
+            param_widgets.append(widgets.HTML(f"<p style='margin-left:150px; color:gray;'><small>{param_info['description']}</small></p>"))
+            self.param_inputs[param_name] = widget
+        
+        self.optimizer_params_box.children = param_widgets
+    
+    def _on_apply(self, button):
+        """Apply configuration and load ROM model."""
+        with self.output:
+            clear_output()
+            print("🔄 Applying optimizer configuration...")
+            
+            try:
+                # Collect configuration
+                self._collect_configuration()
+                
+                # Load ROM model
+                success = self._load_rom_model()
+                
+                if success:
+                    # Generate Z0 options
+                    success = self._generate_z0_options()
+                
+                if success:
+                    print("\n✅ Configuration applied successfully!")
+                    print("\n📋 Configuration Summary:")
+                    self._print_summary()
+                    
+                    # Store globally for access from run file
+                    import builtins
+                    builtins.optimizer_dashboard_config = self.get_config()
+                    print("\n💾 Configuration stored as 'optimizer_dashboard_config'")
+                else:
+                    print("\n❌ Configuration failed. Please check errors above.")
+                    
+            except Exception as e:
+                print(f"\n❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    def _collect_configuration(self):
+        """Collect all configuration from widgets."""
+        # Selected states
+        self.optimizer_config['selected_states'] = [
+            state for state, cb in self.state_checkboxes.items() if cb.value
+        ]
+        
+        # Number of steps
+        self.optimizer_config['num_steps'] = self.num_steps_input.value
+        
+        # Optimizer type and params
+        opt_mode = self.optimization_mode_dropdown.value
+        if opt_mode == 'hybrid':
+            self.optimizer_config['optimizer_type'] = 'Hybrid'
+            self.optimizer_config['init_strategy'] = 'midpoint'
+            self.optimizer_config['optimizer_params'] = {}
+            self.optimizer_config['hybrid_config'] = {
+                'stage1_source': self.hybrid_stage1_dropdown.value,
+                'stage1_params': {
+                    name: w.value for name, w in self.hybrid_stage1_param_inputs.items()
+                },
+                'stage2_type': self.hybrid_stage2_dropdown.value,
+                'stage2_params': {
+                    name: w.value for name, w in self.hybrid_stage2_param_inputs.items()
+                },
+            }
+            if self.hybrid_stage1_dropdown.value == 'RL':
+                self.optimizer_config['hybrid_config']['stage1_params']['pkl_path'] = \
+                    self.hybrid_rl_pkl_dropdown.value
+        else:
+            self.optimizer_config['optimizer_type'] = self.optimizer_type_dropdown.value
+            self.optimizer_config['init_strategy'] = self.init_strategy_dropdown.value
+            self.optimizer_config['optimizer_params'] = {
+                name: widget.value for name, widget in self.param_inputs.items()
+            }
+            self.optimizer_config.pop('hybrid_config', None)
+        
+        # Action ranges
+        self.optimizer_config['action_ranges'] = {
+            'producer_bhp': {
+                'min': self.bhp_min_input.value,
+                'max': self.bhp_max_input.value
+            },
+            'gas_injection': {
+                'min': self.gas_min_input.value,
+                'max': self.gas_max_input.value
+            }
+        }
+        
+        # Prediction mode
+        self.optimizer_config['prediction_mode'] = self.prediction_mode_radio.value
+
+        # Economic params (update config)
+        if self.config and hasattr(self.config, 'rl_model'):
+            self.config.rl_model['economics']['prices']['gas_injection_revenue'] = self.gas_revenue_input.value
+            self.config.rl_model['economics']['prices']['gas_injection_cost'] = self.gas_cost_input.value
+            self.config.rl_model['economics']['prices']['water_production_penalty'] = self.water_penalty_input.value
+            self.config.rl_model['economics']['prices']['gas_production_penalty'] = self.gas_penalty_input.value
+            self.config.rl_model['economics']['scale_factor'] = self.scale_factor_input.value
+    
+    def _load_rom_model(self) -> bool:
+        """Load selected ROM model."""
+        if not self.optimizer_config['selected_rom']:
+            print("❌ No ROM model selected!")
+            return False
+        
+        if not ROM_AVAILABLE:
+            print("❌ ROM modules not available!")
+            return False
+        
+        print("🧠 Loading ROM model...")
+        
+        # Setup device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.optimizer_config['device'] = self.device
+        print(f"   Device: {self.device}")
+        
+        # Load ROM config
+        rom_config_path = Path(__file__).parent.parent.parent / 'ROM_Refactored' / 'config.yaml'
+        rom_config = Config(str(rom_config_path))
+        
+        # Update config with model architecture info
+        model_info = self.optimizer_config['selected_rom'].get('info', {})
+        
+        # CRITICAL: Set number of channels from model info
+        if 'channels' in model_info:
+            num_channels = model_info['channels']
+            rom_config.model['n_channels'] = num_channels
+            
+            # Propagate to data.input_shape[0]
+            if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+                if isinstance(rom_config.config['data']['input_shape'], list) and len(rom_config.config['data']['input_shape']) > 0:
+                    rom_config.config['data']['input_shape'][0] = num_channels
+            
+            # Update encoder conv1 input channels
+            if 'encoder' in rom_config.config and 'conv_layers' in rom_config.config['encoder']:
+                if 'conv1' in rom_config.config['encoder']['conv_layers']:
+                    rom_config.config['encoder']['conv_layers']['conv1'][0] = num_channels
+            
+            # Update decoder final_conv output channels
+            if 'decoder' in rom_config.config and 'deconv_layers' in rom_config.config['decoder']:
+                if 'final_conv' in rom_config.config['decoder']['deconv_layers']:
+                    rom_config.config['decoder']['deconv_layers']['final_conv'][1] = num_channels
+            
+            print(f"   📊 Model channels: {num_channels}")
+        
+        if 'latent_dim' in model_info:
+            rom_config.model['latent_dim'] = model_info['latent_dim']
+            print(f"   📊 Latent dim: {model_info['latent_dim']}")
+            
+        if 'encoder_hidden_dims' in model_info:
+            rom_config.config['transition']['encoder_hidden_dims'] = model_info['encoder_hidden_dims']
+        else:
+            # Try to infer from checkpoint
+            transition_file = self.optimizer_config['selected_rom']['transition']
+            encoder_hidden_dims = self._infer_encoder_hidden_dims(transition_file)
+            if encoder_hidden_dims:
+                rom_config.config['transition']['encoder_hidden_dims'] = encoder_hidden_dims
+        
+        # Detect transition type (linear vs clru) from filename or weights
+        transition_file = self.optimizer_config['selected_rom']['transition']
+        trn_type = model_info.get(
+            'transition_type',
+            self._detect_transition_type_from_weights(transition_file)
+        )
+        rom_config.config.setdefault('transition', {})['type'] = trn_type
+        print(f"   📊 Transition type: {trn_type}")
+        
+        # Update norm_type if detected from filename
+        if 'norm_type' in model_info:
+            if 'encoder' not in rom_config.config:
+                rom_config.config['encoder'] = {}
+            if 'decoder' not in rom_config.config:
+                rom_config.config['decoder'] = {}
+            rom_config.config['encoder']['norm_type'] = model_info['norm_type']
+            rom_config.config['decoder']['norm_type'] = model_info['norm_type']
+            print(f"   📊 Norm type: {model_info['norm_type']}")
+        
+        # Detect GNN mode from filename or encoder weights
+        encoder_file = self.optimizer_config['selected_rom']['encoder']
+        is_gnn = model_info.get('gnn', self._detect_gnn_from_weights(encoder_file))
+        if is_gnn:
+            print(f"   📊 GNN: {is_gnn}")
+
+        # Detect multimodal mode from filename or encoder weights
+        if is_gnn:
+            is_multimodal = False
+        elif 'multimodal' in model_info:
+            is_multimodal = model_info['multimodal']
+            print(f"   📊 Multimodal: {is_multimodal} (from filename)")
+        else:
+            is_multimodal = self._detect_multimodal_from_weights(encoder_file)
+            print(f"   📊 Multimodal: {is_multimodal} (from weights)")
+        
+        if 'gnn' not in rom_config.config:
+            rom_config.config['gnn'] = {}
+        rom_config.config['gnn']['enable'] = is_gnn
+
+        if is_gnn:
+            rom_config.model['n_channels'] = 4
+            if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+                if isinstance(rom_config.config['data']['input_shape'], list):
+                    rom_config.config['data']['input_shape'][0] = 4
+
+        if 'multimodal' not in rom_config.config:
+            rom_config.config['multimodal'] = {}
+        rom_config.config['multimodal']['enable'] = is_multimodal
+        
+        if is_multimodal:
+            latent_dim = rom_config.model.get('latent_dim', 128)
+            static_ld = rom_config.config['multimodal'].get('static_latent_dim', 32)
+            dynamic_ld = rom_config.config['multimodal'].get('dynamic_latent_dim', 96)
+            if static_ld + dynamic_ld != latent_dim:
+                rom_config.config['multimodal']['dynamic_latent_dim'] = latent_dim - static_ld
+        
+        # Detect decoder type from saved weights (standard vs smooth)
+        decoder_file = self.optimizer_config['selected_rom']['decoder']
+        detected_decoder_type = self._detect_decoder_type_from_weights(decoder_file)
+        if detected_decoder_type:
+            current_decoder_type = rom_config.config.get('decoder', {}).get('type', 'standard')
+            if detected_decoder_type != current_decoder_type:
+                if 'decoder' not in rom_config.config:
+                    rom_config.config['decoder'] = {}
+                rom_config.config['decoder']['type'] = detected_decoder_type
+                print(f"   📊 Decoder type: {current_decoder_type} → {detected_decoder_type} (from weights)")
+        
+        # Detect VAE mode from encoder weights
+        vae_enabled = self._detect_vae_from_weights(encoder_file)
+        
+        # Ensure model and loss config sections exist
+        if 'model' not in rom_config.config:
+            rom_config.config['model'] = {}
+        if 'loss' not in rom_config.config:
+            rom_config.config['loss'] = {}
+        
+        if vae_enabled:
+            rom_config.config['model']['enable_vae'] = True
+            rom_config.config['loss']['enable_kl_loss'] = True
+            print(f"   📊 VAE mode: enabled (detected from weights)")
+        else:
+            rom_config.config['model']['enable_vae'] = False
+            rom_config.config['loss']['enable_kl_loss'] = False
+        
+        # Initialize and load model
+        self.loaded_rom_model = ROMWithE2C(rom_config).to(self.device)
+        
+        selected_rom = self.optimizer_config['selected_rom']
+        self.loaded_rom_model.model.load_weights_from_file(
+            selected_rom['encoder'],
+            selected_rom['decoder'],
+            selected_rom['transition']
+        )
+        self.loaded_rom_model.eval()
+        
+        self.optimizer_config['rom_model'] = self.loaded_rom_model
+        print("   ✅ ROM model loaded successfully!")
+        
+        # Load normalization parameters
+        self._load_normalization_params()
+        
+        return True
+    
+    def _infer_encoder_hidden_dims(self, transition_file: str) -> Optional[List[int]]:
+        """Infer encoder hidden dims from checkpoint."""
+        try:
+            state_dict = torch.load(transition_file, map_location='cpu', weights_only=False)
+            hidden_dims = []
+            layer_idx = 0
+            
+            # Linear transition: trans_encoder.{idx}.0.weight
+            while True:
+                weight_key = f'trans_encoder.{layer_idx}.0.weight'
+                if weight_key not in state_dict:
+                    break
+                out_features = state_dict[weight_key].shape[0]
+                next_key = f'trans_encoder.{layer_idx + 1}.0.weight'
+                if next_key in state_dict:
+                    hidden_dims.append(out_features)
+                layer_idx += 1
+            
+            if hidden_dims:
+                return hidden_dims
+            
+            # CLRU transition: selector.{idx}.0.weight (last layer is plain Linear)
+            layer_idx = 0
+            while f'selector.{layer_idx}.0.weight' in state_dict:
+                hidden_dims.append(state_dict[f'selector.{layer_idx}.0.weight'].shape[0])
+                layer_idx += 1
+            
+            return hidden_dims if hidden_dims else [200, 200]
+        except:
+            return [200, 200]
+    
+    def _detect_multimodal_from_weights(self, encoder_file: str) -> bool:
+        """Detect if encoder weights were saved by MultimodalMSE2C."""
+        try:
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return isinstance(payload, dict) and payload.get('_multimodal', False)
+        except:
+            return False
+
+    def _detect_gnn_from_weights(self, encoder_file: str) -> bool:
+        """Detect if encoder weights were saved by GNNE2C."""
+        try:
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return isinstance(payload, dict) and payload.get('_gnn', False)
+        except:
+            return False
+
+    def _detect_decoder_type_from_weights(self, decoder_file: str) -> Optional[str]:
+        """Detect decoder type (standard vs smooth) from saved weights."""
+        try:
+            state_dict = torch.load(decoder_file, map_location='cpu', weights_only=False)
+            keys = set(state_dict.keys())
+            has_deconv = any(k.startswith('deconv1') for k in keys)
+            has_res_layers = any(k.startswith('res_layers') for k in keys)
+            if has_deconv and not has_res_layers:
+                return 'standard'
+            elif has_res_layers and not has_deconv:
+                return 'smooth'
+            return None
+        except:
+            return None
+
+    def _detect_vae_from_weights(self, encoder_file: str) -> bool:
+        """Detect if encoder weights contain VAE layers (fc_logvar)."""
+        try:
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            if isinstance(payload, dict) and '_multimodal' in payload:
+                dyn_state = payload.get('dynamic_encoder', {})
+                return 'fc_logvar.weight' in dyn_state
+            return 'fc_logvar.weight' in payload
+        except:
+            return False
+
+    def _detect_transition_type_from_weights(self, transition_file: str) -> str:
+        """Detect transition model type from saved weight keys."""
+        try:
+            sd = torch.load(transition_file, map_location='cpu', weights_only=False)
+            has_selector = any(k.startswith('selector.') for k in sd)
+            has_nu_layer = 'nu_layer.weight' in sd
+            has_alpha_layer = 'alpha_layer.weight' in sd
+            has_trans_encoder = any(k.startswith('trans_encoder.') for k in sd)
+            has_At_layer = 'At_layer.weight' in sd
+            has_V_real = 'V_real' in sd
+            has_U_real = 'U_real_layer.weight' in sd
+            has_K_param = 'K' in sd and not has_At_layer
+            has_A_ct = 'A_skew_params' in sd
+            has_attractor = any(k.startswith('attractor_net.') for k in sd)
+            if has_attractor and has_alpha_layer:
+                return 'accss'
+            if has_A_ct:
+                return 'ct_koopman'
+            if has_K_param and not has_selector:
+                return 'koopman'
+            if has_selector and has_alpha_layer and has_V_real:
+                return 's5'
+            if has_selector and has_alpha_layer and has_U_real:
+                return 's4d_dplr'
+            if has_selector and has_alpha_layer:
+                return 's4d'
+            if has_selector and has_nu_layer:
+                return 'clru'
+        except Exception:
+            pass
+        return 'linear'
+
+    def _load_normalization_params(self):
+        """Load normalization parameters."""
+        norm_dir = Path(__file__).parent.parent.parent / 'ROM_Refactored' / 'processed_data'
+        
+        # Find most recent normalization file
+        norm_files = list(norm_dir.glob('normalization_parameters_*.json'))
+        if not norm_files:
+            print("   ⚠️ No normalization parameters found, using defaults")
+            return
+        
+        latest_file = max(norm_files, key=lambda p: p.stat().st_mtime)
+        
+        with open(latest_file) as f:
+            norm_data = json.load(f)
+        
+        # Extract relevant parameters
+        self.optimizer_config['norm_params'] = {}
+        
+        # Handle spatial_channels (can be dict with channel names as keys)
+        if 'spatial_channels' in norm_data:
+            spatial = norm_data['spatial_channels']
+            if isinstance(spatial, dict):
+                # Dictionary format: {"SW": {...}, "SG": {...}, ...}
+                for name, channel_data in spatial.items():
+                    params = channel_data.get('parameters', channel_data)
+                    self.optimizer_config['norm_params'][name] = {
+                        'min': float(params.get('min', 0)),
+                        'max': float(params.get('max', 1)),
+                        'type': channel_data.get('normalization_type', 'minmax')
+                    }
+            elif isinstance(spatial, list):
+                # List format: [{"name": "SW", ...}, ...]
+                for channel in spatial:
+                    name = channel.get('name', '')
+                    self.optimizer_config['norm_params'][name] = {
+                        'min': float(channel.get('min', 0)),
+                        'max': float(channel.get('max', 1)),
+                        'type': channel.get('normalization', 'minmax')
+                    }
+        
+        # Handle control_variables (can be dict or list)
+        if 'control_variables' in norm_data:
+            controls = norm_data['control_variables']
+            if isinstance(controls, dict):
+                for name, var_data in controls.items():
+                    # Parameters may be nested
+                    params = var_data.get('parameters', var_data)
+                    self.optimizer_config['norm_params'][name] = {
+                        'min': float(params.get('min', 0)),
+                        'max': float(params.get('max', 1))
+                    }
+            elif isinstance(controls, list):
+                for var in controls:
+                    name = var.get('variable', var.get('name', ''))
+                    params = var.get('parameters', var)
+                    self.optimizer_config['norm_params'][name] = {
+                        'min': float(params.get('min', 0)),
+                        'max': float(params.get('max', 1))
+                    }
+        
+        # Handle observation_variables (can be dict or list)
+        if 'observation_variables' in norm_data:
+            obs = norm_data['observation_variables']
+            if isinstance(obs, dict):
+                for name, var_data in obs.items():
+                    if name not in self.optimizer_config['norm_params']:
+                        # Parameters may be nested
+                        params = var_data.get('parameters', var_data)
+                        self.optimizer_config['norm_params'][name] = {
+                            'min': float(params.get('min', 0)),
+                            'max': float(params.get('max', 1))
+                        }
+            elif isinstance(obs, list):
+                for var in obs:
+                    name = var.get('variable', var.get('name', ''))
+                    if name not in self.optimizer_config['norm_params']:
+                        params = var.get('parameters', var)
+                        self.optimizer_config['norm_params'][name] = {
+                            'min': float(params.get('min', 0)),
+                            'max': float(params.get('max', 1))
+                        }
+        
+        print(f"   ✅ Loaded normalization params from {latest_file.name}")
+    
+    def _generate_z0_options(self) -> bool:
+        """Generate initial state (Z0) from selected case index or all cases."""
+        # Check if loading all cases
+        load_all = self.load_all_cases_checkbox.value
+        
+        if load_all:
+            return self._generate_all_z0_options()
+        else:
+            return self._generate_single_z0_option()
+    
+    def _generate_single_z0_option(self) -> bool:
+        """Generate initial state (Z0) from a single selected case index."""
+        case_index = self.z0_case_index_input.value
+        self.optimizer_config['z0_case_index'] = case_index
+        
+        print(f"🏔️ Loading initial state from Case #{case_index}...")
+        
+        try:
+            import h5py
+            
+            # Load state data for selected case only
+            selected_states = self.optimizer_config['selected_states']
+            state_data = {}
+            num_cases = 0
+            
+            for state in selected_states:
+                state_file = os.path.join(self.state_folder, f'batch_spatial_properties_{state}.h5')
+                if os.path.exists(state_file):
+                    with h5py.File(state_file, 'r') as f:
+                        data = f['data'][:]
+                        num_cases = data.shape[0]
+                        
+                        # Validate case index
+                        if case_index >= num_cases:
+                            print(f"   ❌ Case index {case_index} out of range (0-{num_cases-1})")
+                            return False
+                        
+                        # Take first timestep of selected case
+                        state_data[state] = data[case_index, 0, :, :, :]  # (X, Y, Z)
+            
+            if not state_data:
+                print("   ❌ No state data found!")
+                return False
+            
+            # Normalize and stack
+            channels = []
+            for state in selected_states:
+                if state in state_data:
+                    data = state_data[state]
+                    # Normalize
+                    if state in self.optimizer_config['norm_params']:
+                        params = self.optimizer_config['norm_params'][state]
+                        data = (data - params['min']) / (params['max'] - params['min'] + 1e-8)
+                    # Add batch dimension: (1, X, Y, Z)
+                    channels.append(torch.tensor(data, dtype=torch.float32).unsqueeze(0))
+            
+            # Stack channels: (1, num_channels, X, Y, Z)
+            spatial_state = torch.cat([ch.unsqueeze(1) for ch in channels], dim=1).to(self.device)
+            
+            # Encode to latent space
+            with torch.no_grad():
+                if hasattr(self.loaded_rom_model.model, 'encode_initial'):
+                    z0 = self.loaded_rom_model.model.encode_initial(spatial_state)
+                elif hasattr(self.loaded_rom_model.model, 'static_encoder'):
+                    sc = self.loaded_rom_model.model.static_channels
+                    dc = self.loaded_rom_model.model.dynamic_channels
+                    z_s, _, _ = self.loaded_rom_model.model.static_encoder(spatial_state[:, sc, :, :, :])
+                    z_d, _, _ = self.loaded_rom_model.model.dynamic_encoder(spatial_state[:, dc, :, :, :])
+                    z0 = torch.cat([z_s, z_d], dim=-1)
+                else:
+                    encoder_output = self.loaded_rom_model.model.encoder(spatial_state)
+                    if isinstance(encoder_output, tuple):
+                        z0 = encoder_output[0]
+                    else:
+                        z0 = encoder_output
+            
+            self.generated_z0_options = z0  # Single Z0 (batch size 1)
+            self.optimizer_config['z0_options'] = z0
+            self.optimizer_config['spatial_states'] = spatial_state  # Store for multimodal
+            
+            print(f"   ✅ Loaded initial state from Case #{case_index} (of {num_cases} available)")
+            print(f"   Z0 shape: {z0.shape}")
+            print(f"   Z0 stats: mean={z0.mean().item():.4f}, std={z0.std().item():.4f}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error generating Z0: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _generate_all_z0_options(self) -> bool:
+        """Generate initial states (Z0) for ALL available cases (RL-like sampling)."""
+        print(f"🏔️ Loading ALL initial states for RL-like sampling...")
+        
+        try:
+            import h5py
+            
+            # Load state data for ALL cases
+            selected_states = self.optimizer_config['selected_states']
+            all_state_data = {}
+            num_cases = 0
+            
+            for state in selected_states:
+                state_file = os.path.join(self.state_folder, f'batch_spatial_properties_{state}.h5')
+                if os.path.exists(state_file):
+                    with h5py.File(state_file, 'r') as f:
+                        data = f['data'][:]  # Shape: (num_cases, num_timesteps, X, Y, Z)
+                        num_cases = data.shape[0]
+                        # Take first timestep of ALL cases
+                        all_state_data[state] = data[:, 0, :, :, :]  # (num_cases, X, Y, Z)
+                        print(f"   📦 Loaded {state}: shape {all_state_data[state].shape}")
+            
+            if not all_state_data:
+                print("   ❌ No state data found!")
+                return False
+            
+            print(f"   📊 Processing {num_cases} cases...")
+            
+            # Process in batches to avoid memory issues
+            batch_size = 100
+            all_z0 = []
+            all_spatial = []
+            
+            for batch_start in range(0, num_cases, batch_size):
+                batch_end = min(batch_start + batch_size, num_cases)
+                batch_indices = range(batch_start, batch_end)
+                
+                # Normalize and stack for this batch
+                batch_channels = []
+                for state in selected_states:
+                    if state in all_state_data:
+                        data = all_state_data[state][batch_start:batch_end]  # (batch, X, Y, Z)
+                        # Normalize
+                        if state in self.optimizer_config['norm_params']:
+                            params = self.optimizer_config['norm_params'][state]
+                            data = (data - params['min']) / (params['max'] - params['min'] + 1e-8)
+                        # Shape: (batch, X, Y, Z)
+                        batch_channels.append(torch.tensor(data, dtype=torch.float32))
+                
+                # Stack channels: (batch, num_channels, X, Y, Z)
+                spatial_batch = torch.stack([ch.unsqueeze(1) for ch in batch_channels], dim=2).squeeze(1).to(self.device)
+                all_spatial.append(spatial_batch.cpu())
+                
+                # Encode to latent space
+                with torch.no_grad():
+                    if hasattr(self.loaded_rom_model.model, 'encode_initial'):
+                        z0_batch = self.loaded_rom_model.model.encode_initial(spatial_batch)
+                    elif hasattr(self.loaded_rom_model.model, 'static_encoder'):
+                        sc = self.loaded_rom_model.model.static_channels
+                        dc = self.loaded_rom_model.model.dynamic_channels
+                        z_s, _, _ = self.loaded_rom_model.model.static_encoder(spatial_batch[:, sc, :, :, :])
+                        z_d, _, _ = self.loaded_rom_model.model.dynamic_encoder(spatial_batch[:, dc, :, :, :])
+                        z0_batch = torch.cat([z_s, z_d], dim=-1)
+                    else:
+                        encoder_output = self.loaded_rom_model.model.encoder(spatial_batch)
+                        if isinstance(encoder_output, tuple):
+                            z0_batch = encoder_output[0]
+                        else:
+                            z0_batch = encoder_output
+                
+                all_z0.append(z0_batch.cpu())
+                
+                if (batch_start // batch_size) % 2 == 0:
+                    print(f"   📈 Encoded cases {batch_start}-{batch_end} of {num_cases}")
+            
+            # Concatenate all batches
+            z0_all = torch.cat(all_z0, dim=0).to(self.device)  # (num_cases, latent_dim)
+            spatial_all = torch.cat(all_spatial, dim=0)  # Keep on CPU to save GPU memory
+            
+            self.generated_z0_options = z0_all
+            self.optimizer_config['z0_options'] = z0_all
+            self.optimizer_config['z0_case_index'] = 'all'
+            self.optimizer_config['spatial_states'] = spatial_all
+            
+            print(f"   ✅ Loaded ALL {num_cases} initial states!")
+            print(f"   Z0 shape: {z0_all.shape}")
+            print(f"   Z0 stats: mean={z0_all.mean().item():.4f}, std={z0_all.std().item():.4f}")
+            print(f"   🎲 Ready for RL-like random sampling!")
+            
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error generating all Z0 options: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _print_summary(self):
+        """Print configuration summary."""
+        print(f"\n{'='*50}")
+        print(f"Optimizer: {self.optimizer_config['optimizer_type']}")
+        print(f"Initialization: {self.optimizer_config.get('init_strategy', 'midpoint')}")
+        print(f"ROM Model: {self.optimizer_config['selected_rom']['name']}")
+        print(f"States: {self.optimizer_config['selected_states']}")
+        print(f"Timesteps: {self.optimizer_config['num_steps']}")
+        print(f"Z0 Case Index: {self.optimizer_config.get('z0_case_index', 0)}")
+        print(f"\nOptimizer Parameters:")
+        for k, v in self.optimizer_config['optimizer_params'].items():
+            print(f"  {k}: {v}")
+        print(f"\nControl Bounds (matching RL):")
+        print(f"  BHP: [{self.optimizer_config['action_ranges']['producer_bhp']['min']:.2f}, "
+              f"{self.optimizer_config['action_ranges']['producer_bhp']['max']:.2f}] psi")
+        print(f"  Gas: [{self.optimizer_config['action_ranges']['gas_injection']['min']:.0f}, "
+              f"{self.optimizer_config['action_ranges']['gas_injection']['max']:.0f}] ft³/day")
+        print(f"{'='*50}")
+    
+    def get_config(self) -> Dict:
+        """Get complete configuration dictionary."""
+        opt_params = self.optimizer_config.get('optimizer_params', {})
+        
+        cfg = {
+            'optimizer_type': self.optimizer_config['optimizer_type'],
+            'init_strategy': self.optimizer_config.get('init_strategy', 'midpoint'),
+            'rom_model': self.loaded_rom_model,
+            'config': self.config,
+            'norm_params': self.optimizer_config['norm_params'],
+            'device': self.device,
+            'z0_options': self.generated_z0_options,
+            'z0_case_index': self.optimizer_config.get('z0_case_index', 0),
+            'num_steps': self.optimizer_config['num_steps'],
+            'action_ranges': self.optimizer_config['action_ranges'],
+            'spatial_states': self.optimizer_config.get('spatial_states', None),
+            'prediction_mode': self.optimizer_config.get('prediction_mode', 'state_based'),
+            'optimizer_params': opt_params,
+            'stosag_params': {
+                'num_realizations': 1,
+                'perturbation_size': opt_params.get('perturbation_size', 0.01),
+                'gradient_type': opt_params.get('gradient_type', 'spsa'),
+                'spsa_num_samples': opt_params.get('spsa_num_samples', 5)
+            },
+            'sqp_params': {
+                'max_iterations': opt_params.get('max_iterations', 100),
+                'tolerance': opt_params.get('tolerance', 1e-6)
+            }
+        }
+
+        # Include hybrid config when in hybrid mode
+        if self.optimizer_config.get('optimizer_type') == 'Hybrid':
+            cfg['hybrid_config'] = self.optimizer_config.get('hybrid_config', {})
+
+        return cfg
+    
+    def display(self):
+        """Display the dashboard."""
+        display(self.dashboard)
+        return self
+    
+    def _ipython_display_(self):
+        """IPython display hook."""
+        self.display()
+
+
+def launch_optimizer_config_dashboard(config_path: str = 'config.yaml') -> OptimizerConfigDashboard:
+    """
+    Launch the optimizer configuration dashboard.
+    
+    Single-line launcher for use in Jupyter notebooks.
+    
+    Args:
+        config_path: Path to configuration file
+        
+    Returns:
+        OptimizerConfigDashboard instance
+    """
+    dashboard = OptimizerConfigDashboard(config_path)
+    dashboard.display()
+    return dashboard

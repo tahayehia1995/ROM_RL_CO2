@@ -1,0 +1,71 @@
+# ============================================================================
+# DATA PREPROCESSING CONFIGURATION
+# ============================================================================
+# Configuration for Part 1: Data Preprocessing Module
+
+# ============================================================================
+# DATA DIRECTORY SETTINGS
+# ============================================================================
+paths:
+  data_dir: 'sr3_batch_output/'           # Directory containing raw H5 data files
+  processed_data_dir: './processed_data/'  # Directory to save processed data files
+  normalization_params_dir: './processed_data/'  # Directory to save normalization parameters
+
+# ============================================================================
+# PROCESSING PARAMETERS
+# ============================================================================
+processing:
+  nsteps: 2                                # Number of time steps for sliding window | Range: 1-30
+  train_split_ratio: 0.75                 # Ratio of training to evaluation data | Range: 0.5-0.9
+  random_seed: 42                         # Random seed for reproducibility
+
+# ============================================================================
+# NORMALIZATION SETTINGS
+# ============================================================================
+normalization:
+  # Default normalization types for different data types
+  # Options: 'minmax', 'log', 'none'
+  default_spatial_normalization: 'minmax'    # Normalization for spatial properties (PRES, SG, SW, etc.)
+  default_timeseries_normalization: 'minmax' # Normalization for time series data (BHP, rates, etc.)
+  
+  # Per-dataset normalization settings (can be overridden in dashboard)
+  spatial_datasets:
+    PRES: 'minmax'    # Pressure normalization
+    SG: 'minmax'      # Gas saturation normalization
+    SW: 'minmax'      # Water saturation normalization
+    PERMI: 'log'      # Permeability X normalization (log scale)
+    PERMJ: 'log'      # Permeability Y normalization (log scale)
+    PERMK: 'log'      # Permeability Z normalization (log scale)
+    POROS: 'minmax'   # Porosity normalization
+  
+  timeseries_datasets:
+    BHP: 'minmax'           # Bottom hole pressure normalization
+    GASRATSC: 'minmax'      # Gas rate normalization
+    WATRATSC: 'minmax'      # Water rate normalization
+
+# ============================================================================
+# DATA VALIDATION SETTINGS
+# ============================================================================
+validation:
+  check_file_integrity: true              # Verify H5 files can be opened
+  check_data_shapes: true                 # Verify data shapes are consistent
+  check_data_ranges: true                 # Check for NaN/Inf values
+  warn_on_missing_files: true             # Warn if expected files are missing
+
+# ============================================================================
+# OUTPUT SETTINGS
+# ============================================================================
+output:
+  save_normalization_params: true         # Save normalization parameters to JSON
+  save_processed_data: true               # Save processed tensors to H5
+  include_metadata: true                  # Include metadata in saved files
+  include_data_selections: true           # Include user selections in saved files
+  timestamp_files: true                   # Add timestamp to output filenames
+
+# ============================================================================
+# RUNTIME SETTINGS
+# ============================================================================
+runtime:
+  verbose: true                           # Enable detailed logging
+  show_progress: true                     # Show progress bars during processing
+

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Ignored folder (per user request)
+All_Trained _Surrogate/
+
+# Large data files - too big for GitHub (>100MB per file)
+# processed_data: 2 HDF5 files (~12GB and ~27GB)
+ROM_Refactored/processed_data/*.h5
+
+# sr3_batch_output: 7 spatial property files (~1.5GB each)
+ROM_Refactored/sr3_batch_output/batch_spatial_properties_*.h5
+
+# training_results: 14 pkl files (~1-2GB each)
+RL_Refactored/training_results/*.pkl
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store

@@ -1,0 +1,66 @@
+# =============================================================================
+# DIGITAL TWIN CONFIGURATION
+# =============================================================================
+# Extends ROM_Refactored and RL_Refactored configurations with visualization
+# and dashboard settings.
+# =============================================================================
+
+# --- Parent config paths (relative to this file) ---
+rom_config_path: ../ROM_Refactored/config.yaml
+rl_config_path: ../RL_Refactored/config.yaml
+
+# --- Reservoir grid physical dimensions ---
+grid:
+  nx: 34
+  ny: 16
+  nz: 25
+  # Physical cell sizes (metres) – adjust to match your simulation model
+  dx: 20.0
+  dy: 10.0
+  dz: 5.0
+
+# --- Channel mapping (ROM output tensor channel index -> field name) ---
+# Must match the order used during ROM training (data preprocessing dashboard)
+channels:
+  0: gas_saturation     # SG   (training_position 0)
+  1: pressure           # PRES (training_position 1)
+  2: permeability       # PERMI (training_position 2)
+  3: porosity           # POROS (training_position 3)
+
+# --- Visualization settings ---
+visualization:
+  default_field: pressure
+  well_tube_radius: 0.5
+  opacity:
+    active_cells: 1.0
+    inactive_cells: 0.0
+  surface:
+    z_exaggeration: 3.0
+    show_wellheads: true
+  subsurface:
+    default_slice_i: 17
+    default_slice_j: 8
+    default_slice_k: 12
+  animation:
+    fps: 5
+    export_gif: true
+
+# --- Dashboard settings ---
+dashboard:
+  port: 8050
+  host: 127.0.0.1
+  debug: true
+  auto_play_interval_ms: 1000
+  theme: darkly
+
+# --- Corner-point grid (real CMG geometry) ---
+corner_point:
+  enabled: true
+  dat_file: simulation_data_file.dat
+  z_exaggeration: 30.0
+  cache_file: .corner_point_cache.npy
+
+# --- API service settings ---
+services:
+  host: 127.0.0.1
+  port: 8051
