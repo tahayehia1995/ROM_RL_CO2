@@ -761,20 +761,26 @@ class DigitalTwinEngine:
             return enc_out[0] if isinstance(enc_out, tuple) else enc_out
 
     def _decode_to_spatial(self, latent: torch.Tensor) -> torch.Tensor:
-        """Decode latent to spatial. Handles multimodal reassembly.
+        """Decode latent to spatial.
 
-        For multimodal models, static channels (permeability, porosity) are
-        taken from the **initial** state captured at ``reset()`` -- matching
-        the testing dashboard's approach and avoiding accumulation of
-        decode-encode reconstruction errors across steps.
+        Handles both Multimodal and GNN models (which have
+        ``static_latent_dim``) as well as plain CNN models.  Static
+        channels (permeability, porosity) are taken from the **initial**
+        state captured at ``reset()``.
         """
         with torch.no_grad():
             model = self.rom.model
             if hasattr(model, "static_latent_dim"):
                 z_static = latent[:, :model.static_latent_dim]
                 z_dynamic = latent[:, model.static_latent_dim:]
-                z_for_dec = model._concat_for_decoder(z_static, z_dynamic)
-                x_dyn = model.decoder(z_for_dec)
+                if hasattr(model, "_concat_for_decoder"):
+                    z_for_dec = model._concat_for_decoder(z_static, z_dynamic)
+                else:
+                    z_for_dec = torch.cat([z_static, z_dynamic], dim=-1)
+                if hasattr(model, "_decode_cnn"):
+                    x_dyn = model._decode_cnn(z_for_dec)
+                else:
+                    x_dyn = model.decoder(z_for_dec)
                 if hasattr(model, "_reassemble"):
                     if self._initial_static_channels is not None:
                         return model._reassemble(x_dyn, self._initial_static_channels)

@@ -79,7 +79,7 @@ def build_time_series_panel() -> dbc.Card:
             ], className="g-1"),
 
             # --- Row 3: Water Production (3 wells) ---
-            html.Div("Water Production (ft\u00b3/day)", style={
+            html.Div("Water Production (BBL/day)", style={
                 "color": "#53d8fb", "fontSize": "0.8rem", "fontWeight": "600",
                 "marginBottom": "4px", "marginTop": "16px",
             }),

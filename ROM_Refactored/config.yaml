@@ -237,7 +237,7 @@ decoder:
   use_exact_dimensions: true
   norm_type: batchnorm
 transition:
-  type: linear
+  type: mamba2
   encoder_hidden_dims:
   - 300
   - 300
@@ -334,7 +334,7 @@ transition:
 training:
   batch_size: 16
   learning_rate: 0.0001
-  nsteps: 2
+  nsteps: 5
   num_tsteps: 30
   epoch: 200
   enable_scheduled_sampling: false

@@ -241,10 +241,11 @@ def register_callbacks(app, engine):
         bhp_data = mgr.injector_bhp_history()
         gas_data = mgr.gas_production_history()
         wat_data = mgr.water_production_history()
+        wat_data_bbl = wat_data / 5.615 if wat_data.ndim == 2 else wat_data
 
         bhp_figs = _per_well_charts(bhp_data, _WELL_NAMES_INJ, steps, "#4499ff")
         gas_figs = _per_well_charts(gas_data, _WELL_NAMES_PROD, steps, "#00dd44")
-        wat_figs = _per_well_charts(wat_data, _WELL_NAMES_PROD, steps, "#ff9900")
+        wat_figs = _per_well_charts(wat_data_bbl, _WELL_NAMES_PROD, steps, "#ff9900")
 
         kpis = mgr.compute_kpis()
         cum = np.cumsum(kpis.get("step_rewards", [0])).tolist()
