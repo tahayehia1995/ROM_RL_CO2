@@ -5414,14 +5414,14 @@ class InteractiveVisualizationDashboard:
                 show_scalar_bar=True,
                 scalar_bar_args=dict(
                     title=field_name, color="white",
-                    title_font_size=12, label_font_size=10,
-                    position_x=0.85, position_y=0.1, height=0.7, width=0.08
+                    title_font_size=10, label_font_size=8,
+                    position_x=0.88, position_y=0.15, height=0.6, width=0.05
                 )
             )
             plotter.view_yz()
             plotter.camera.elevation = 20
             plotter.camera.azimuth = -30
-            plotter.camera.zoom(1.2)
+            plotter.camera.zoom(1.0)
             arr = plotter.screenshot(return_img=True)
             plotter.close()
             return Image.fromarray(arr)
@@ -5440,13 +5440,13 @@ class InteractiveVisualizationDashboard:
                 show_scalar_bar=True,
                 scalar_bar_args=dict(
                     title=field_name, color="white",
-                    title_font_size=10, label_font_size=8,
-                    position_x=0.82, position_y=0.1, height=0.7, width=0.06
+                    title_font_size=8, label_font_size=7,
+                    position_x=0.88, position_y=0.15, height=0.6, width=0.04
                 )
             )
             view_fn = {"i": plotter.view_yz, "j": plotter.view_xz, "k": plotter.view_xy}
             view_fn[axis]()
-            plotter.camera.zoom(1.4)
+            plotter.camera.zoom(1.1)
             arr = plotter.screenshot(return_img=True)
             plotter.close()
             return Image.fromarray(arr)
