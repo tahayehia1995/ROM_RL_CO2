@@ -5382,16 +5382,15 @@ class InteractiveVisualizationDashboard:
         fig_pred.update_layout(width=panel_w, height=panel_h)
         fig_true.update_layout(width=panel_w, height=panel_h)
         
-        # Export each panel to PNG via kaleido
-        buf_pred = io.BytesIO()
-        fig_pred.write_image(buf_pred, format="png", scale=1.0)
-        buf_pred.seek(0)
-        img_pred = Image.open(buf_pred).copy()
+        # Export each panel to PNG via kaleido's PlotlyScope directly
+        from kaleido.scopes.plotly import PlotlyScope
+        scope = PlotlyScope()
         
-        buf_true = io.BytesIO()
-        fig_true.write_image(buf_true, format="png", scale=1.0)
-        buf_true.seek(0)
-        img_true = Image.open(buf_true).copy()
+        img_bytes_pred = scope.transform(fig_pred, format="png", scale=1.0)
+        img_pred = Image.open(io.BytesIO(img_bytes_pred)).copy()
+        
+        img_bytes_true = scope.transform(fig_true, format="png", scale=1.0)
+        img_true = Image.open(io.BytesIO(img_bytes_true)).copy()
         
         # Stitch side-by-side with title and labels
         gap = 20
