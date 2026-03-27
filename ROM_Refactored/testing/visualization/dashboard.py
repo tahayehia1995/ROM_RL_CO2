@@ -5314,12 +5314,15 @@ class InteractiveVisualizationDashboard:
         
         from DigitalTwin.visualization.scene_builder import ReservoirSceneBuilder
         
-        # Load corner-point grid
+        # Load corner-point grid from H5 (contains 'corners' dataset)
         cpg = None
         cpg_path = _ROM_DIR / "sr3_batch_output" / "corner_point_grid.h5"
         if cpg_path.exists():
+            import h5py
             from DigitalTwin.visualization.corner_point_grid import CornerPointGrid
-            cpg = CornerPointGrid.from_h5(str(cpg_path))
+            with h5py.File(str(cpg_path), "r") as hf:
+                corners = hf["corners"][:]
+            cpg = CornerPointGrid(corners, z_exaggeration=30.0, negate_y=True)
         
         # Resolve the active mask from dashboard attributes
         active_mask = None
