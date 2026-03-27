@@ -2126,6 +2126,19 @@ class InteractiveVisualizationDashboard:
             style={'description_width': 'initial'}
         )
         
+        self.anim_i_slider = widgets.IntSlider(
+            value=self.Nx//2, min=0, max=self.Nx-1, step=1,
+            description='I-Slice:', style={'description_width': 'initial'}
+        )
+        self.anim_j_slider = widgets.IntSlider(
+            value=self.Ny//2, min=0, max=self.Ny-1, step=1,
+            description='J-Slice:', style={'description_width': 'initial'}
+        )
+        self.anim_k_slider = widgets.IntSlider(
+            value=self.Nz//2, min=0, max=self.Nz-1, step=1,
+            description='K-Slice:', style={'description_width': 'initial'}
+        )
+        
         self.play_button = widgets.Button(
             description='▶️ Play Animation',
             button_style='success',
@@ -2162,6 +2175,9 @@ class InteractiveVisualizationDashboard:
         self.anim_layer_slider.observe(self._stop_animation_on_change, names='value')
         self.anim_field_dropdown.observe(self._stop_animation_on_change, names='value')
         self.anim_mode_dropdown.observe(self._stop_animation_on_change, names='value')
+        self.anim_i_slider.observe(self._stop_animation_on_change, names='value')
+        self.anim_j_slider.observe(self._stop_animation_on_change, names='value')
+        self.anim_k_slider.observe(self._stop_animation_on_change, names='value')
         
         # Animation control variables
         self.animation_running = False
@@ -2174,6 +2190,8 @@ class InteractiveVisualizationDashboard:
             self.anim_layer_slider,
             self.anim_field_dropdown,
             self.anim_mode_dropdown,
+            widgets.HTML("<b>3D Slice Indices (for 3D Volume mode):</b>"),
+            widgets.HBox([self.anim_i_slider, self.anim_j_slider, self.anim_k_slider]),
             widgets.HBox([self.play_button, self.stop_button]),
             self.animation_speed_slider,
             self.animation_status
@@ -5198,7 +5216,12 @@ class InteractiveVisualizationDashboard:
                         with open(debug_log, "a") as f:
                             f.write(f"  Creating 3D frame {timestep_idx}\n")
                         # 3D Mode - returns a PIL Image directly
-                        pil_img = self._create_3d_animation_frame(case_idx, field_idx, timestep_idx)
+                        pil_img = self._create_3d_animation_frame(
+                            case_idx, field_idx, timestep_idx,
+                            si=self.anim_i_slider.value,
+                            sj=self.anim_j_slider.value,
+                            sk=self.anim_k_slider.value,
+                        )
                         gif_frames.append(pil_img)
                         
                         with open(debug_log, "a") as f:
@@ -5297,14 +5320,15 @@ class InteractiveVisualizationDashboard:
             self.stop_button.disabled = True
             self.animation_status.value = 'Animation Status: Stopped (Control Changed)'
     
-    def _create_3d_animation_frame(self, case_idx, field_idx, timestep_idx):
-        """Create 3D animation frame as a PIL Image using PyVista offscreen rendering.
+    def _create_3d_animation_frame(self, case_idx, field_idx, timestep_idx,
+                                     si=None, sj=None, sk=None):
+        """Create 3D animation frame with I/J/K slices as a PIL Image.
         
-        Uses the same corner-point grid and SubsurfaceRenderer as the Digital Twin
-        but renders via PyVista's offscreen plotter (no kaleido dependency).
+        Layout:
+          Row 1: Predicted 3D  |  True 3D        (side-by-side)
+          Row 2: Pred I-slice | True I-slice  |  Pred J-slice | True J-slice  |  Pred K-slice | True K-slice
         """
         import sys
-        import io
         import numpy as np
         import pyvista as pv
         from PIL import Image, ImageDraw, ImageFont
@@ -5315,7 +5339,7 @@ class InteractiveVisualizationDashboard:
         
         from DigitalTwin.visualization.subsurface_renderer import SubsurfaceRenderer
         
-        # Load corner-point grid from H5
+        # Load corner-point grid
         cpg = None
         cpg_path = _ROM_DIR / "sr3_batch_output" / "corner_point_grid.h5"
         if cpg_path.exists():
@@ -5349,13 +5373,20 @@ class InteractiveVisualizationDashboard:
         }
         dt_field_name = dt_field_map.get(field_key, "pressure")
         
+        if si is None:
+            si = self.Nx // 2
+        if sj is None:
+            sj = self.Ny // 2
+        if sk is None:
+            sk = self.Nz // 2
+        
         # Get single-channel field data
         pred_field = self.state_pred[case_idx, timestep_idx, field_idx].cpu().detach().numpy()
         true_field = self.state_seq_true_aligned[case_idx, field_idx, timestep_idx].cpu().numpy()
         pred_field = self._denormalize_field_data(pred_field, field_key)
         true_field = self._denormalize_field_data(true_field, field_key)
         
-        # Unified color range
+        # Unified color range across all panels
         pred_vals = pred_field[active_mask] if active_mask is not None else pred_field
         true_vals = true_field[active_mask] if active_mask is not None else true_field
         all_vals = np.concatenate([pred_vals.ravel(), true_vals.ravel()])
@@ -5366,19 +5397,17 @@ class InteractiveVisualizationDashboard:
             mid = (vmin + vmax) / 2
             vmin, vmax = mid - min_span / 2, mid + min_span / 2
         
-        panel_w, panel_h = 600, 500
+        _BG = [10/255, 10/255, 26/255]
+        _BG_RGB = (10, 10, 26)
+        pv.OFF_SCREEN = True
         
-        def _render_panel(field_data, label):
-            """Render a single 3D panel to PIL Image using PyVista offscreen."""
-            pv.OFF_SCREEN = True
+        def _render_volume(field_data, w, h):
+            """Render full 3D volume."""
             mesh = renderer.render(field_data, dt_field_name, active_mask)
             if mesh is None or mesh.n_points == 0:
-                img = Image.new("RGB", (panel_w, panel_h), color=(10, 10, 26))
-                return img
-            
-            plotter = pv.Plotter(off_screen=True, window_size=[panel_w, panel_h])
-            plotter.set_background([10/255, 10/255, 26/255])
-            
+                return Image.new("RGB", (w, h), color=_BG_RGB)
+            plotter = pv.Plotter(off_screen=True, window_size=[w, h])
+            plotter.set_background(_BG)
             plotter.add_mesh(
                 mesh, scalars=dt_field_name,
                 cmap="jet", clim=[vmin, vmax],
@@ -5389,50 +5418,121 @@ class InteractiveVisualizationDashboard:
                     position_x=0.85, position_y=0.1, height=0.7, width=0.08
                 )
             )
-            
-            # Side view camera
             plotter.view_yz()
             plotter.camera.elevation = 20
             plotter.camera.azimuth = -30
             plotter.camera.zoom(1.2)
-            
-            img_arr = plotter.screenshot(return_img=True)
+            arr = plotter.screenshot(return_img=True)
             plotter.close()
-            return Image.fromarray(img_arr)
+            return Image.fromarray(arr)
         
-        img_pred = _render_panel(pred_field, "Predicted")
-        img_true = _render_panel(true_field, "True")
+        def _render_slice(field_data, axis, index, w, h):
+            """Render a single I/J/K slice."""
+            slicer = {"i": renderer.slice_i, "j": renderer.slice_j, "k": renderer.slice_k}
+            mesh = slicer[axis](field_data, index, dt_field_name, active_mask=active_mask)
+            if mesh is None or mesh.n_points == 0:
+                return Image.new("RGB", (w, h), color=_BG_RGB)
+            plotter = pv.Plotter(off_screen=True, window_size=[w, h])
+            plotter.set_background(_BG)
+            plotter.add_mesh(
+                mesh, scalars=dt_field_name,
+                cmap="jet", clim=[vmin, vmax],
+                show_scalar_bar=True,
+                scalar_bar_args=dict(
+                    title=field_name, color="white",
+                    title_font_size=10, label_font_size=8,
+                    position_x=0.82, position_y=0.1, height=0.7, width=0.06
+                )
+            )
+            view_fn = {"i": plotter.view_yz, "j": plotter.view_xz, "k": plotter.view_xy}
+            view_fn[axis]()
+            plotter.camera.zoom(1.4)
+            arr = plotter.screenshot(return_img=True)
+            plotter.close()
+            return Image.fromarray(arr)
         
-        # Stitch side-by-side with title and labels
-        gap = 20
+        # --- Render all panels ---
+        vol_w, vol_h = 600, 500
+        slice_w, slice_h = 400, 300
+        
+        img_pred_3d = _render_volume(pred_field, vol_w, vol_h)
+        img_true_3d = _render_volume(true_field, vol_w, vol_h)
+        
+        slice_imgs = {}
+        for axis, idx in [("i", si), ("j", sj), ("k", sk)]:
+            slice_imgs[f"pred_{axis}"] = _render_slice(pred_field, axis, idx, slice_w, slice_h)
+            slice_imgs[f"true_{axis}"] = _render_slice(true_field, axis, idx, slice_w, slice_h)
+        
+        # --- Stitch into composite ---
+        gap = 10
         title_h = 40
-        label_h = 30
-        canvas_w = img_pred.width + img_true.width + gap
-        canvas_h = title_h + img_pred.height + label_h
-        canvas = Image.new("RGB", (canvas_w, canvas_h), color=(10, 10, 26))
+        label_h = 25
+        slice_label_h = 25
         
-        canvas.paste(img_pred, (0, title_h))
-        canvas.paste(img_true, (img_pred.width + gap, title_h))
+        # Row 1: two 3D volumes
+        row1_w = vol_w * 2 + gap
+        row1_h = vol_h + label_h
         
+        # Row 2: three slice pairs (each pair = pred + true side-by-side)
+        pair_w = slice_w * 2 + gap
+        row2_w = pair_w * 3 + gap * 2
+        row2_h = slice_h + slice_label_h
+        
+        canvas_w = max(row1_w, row2_w)
+        canvas_h = title_h + row1_h + gap + row2_h
+        canvas = Image.new("RGB", (canvas_w, canvas_h), color=_BG_RGB)
+        
+        # Paste 3D panels (centered)
+        r1_x0 = (canvas_w - row1_w) // 2
+        canvas.paste(img_pred_3d, (r1_x0, title_h))
+        canvas.paste(img_true_3d, (r1_x0 + vol_w + gap, title_h))
+        
+        # Paste slice panels (centered)
+        r2_x0 = (canvas_w - row2_w) // 2
+        r2_y0 = title_h + row1_h + gap
+        for pair_idx, (axis, idx) in enumerate([("i", si), ("j", sj), ("k", sk)]):
+            px = r2_x0 + pair_idx * (pair_w + gap)
+            canvas.paste(slice_imgs[f"pred_{axis}"], (px, r2_y0))
+            canvas.paste(slice_imgs[f"true_{axis}"], (px + slice_w + gap, r2_y0))
+        
+        # Draw text labels
         draw = ImageDraw.Draw(canvas)
         try:
             font_title = ImageFont.truetype("arial.ttf", 20)
-            font_label = ImageFont.truetype("arial.ttf", 16)
+            font_label = ImageFont.truetype("arial.ttf", 14)
+            font_slice = ImageFont.truetype("arial.ttf", 12)
         except (IOError, OSError):
             font_title = ImageFont.load_default()
             font_label = font_title
+            font_slice = font_title
         
+        # Title
         title_text = f"{field_name} - Case {actual_case_idx} - Year {current_year}"
         draw.text((canvas_w // 2, 5), title_text, fill="white",
                   font=font_title, anchor="mt")
         
-        pred_cx = img_pred.width // 2
-        true_cx = img_pred.width + gap + img_true.width // 2
-        label_y = title_h + img_pred.height + 2
-        draw.text((pred_cx, label_y), "Predicted", fill="white",
+        # 3D labels
+        pred_cx = r1_x0 + vol_w // 2
+        true_cx = r1_x0 + vol_w + gap + vol_w // 2
+        lbl_y = title_h + vol_h + 2
+        draw.text((pred_cx, lbl_y), "Predicted", fill="white",
                   font=font_label, anchor="mt")
-        draw.text((true_cx, label_y), "True", fill="white",
+        draw.text((true_cx, lbl_y), "True", fill="white",
                   font=font_label, anchor="mt")
+        
+        # Slice labels
+        slice_lbl_y = r2_y0 + slice_h + 2
+        for pair_idx, (axis, idx) in enumerate([("i", si), ("j", sj), ("k", sk)]):
+            px = r2_x0 + pair_idx * (pair_w + gap)
+            pair_cx = px + pair_w // 2
+            axis_label = f"{axis.upper()}-Slice ({axis}={idx})"
+            draw.text((pair_cx, slice_lbl_y), axis_label, fill="white",
+                      font=font_slice, anchor="mt")
+            # Pred/True sub-labels
+            draw.text((px + slice_w // 2, slice_lbl_y + 13), "Pred", fill="#aaaaaa",
+                      font=font_slice, anchor="mt")
+            draw.text((px + slice_w + gap + slice_w // 2, slice_lbl_y + 13), "True",
+                      fill="#aaaaaa", font=font_slice, anchor="mt")
         
         return canvas
         
