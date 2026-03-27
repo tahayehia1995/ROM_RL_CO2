@@ -5298,23 +5298,24 @@ class InteractiveVisualizationDashboard:
             self.animation_status.value = 'Animation Status: Stopped (Control Changed)'
     
     def _create_3d_animation_frame(self, case_idx, field_idx, timestep_idx):
-        """Create 3D animation frame as a PIL Image using DT's Mesh3d renderer.
+        """Create 3D animation frame as a PIL Image using PyVista offscreen rendering.
         
-        Renders Predicted and True side-by-side using the same ReservoirSceneBuilder
-        as the Digital Twin, then stitches the two PNG panels with PIL.
+        Uses the same corner-point grid and SubsurfaceRenderer as the Digital Twin
+        but renders via PyVista's offscreen plotter (no kaleido dependency).
         """
         import sys
         import io
         import numpy as np
+        import pyvista as pv
         from PIL import Image, ImageDraw, ImageFont
         
         dt_path = str(_ROM_DIR.parent)
         if dt_path not in sys.path:
             sys.path.append(dt_path)
         
-        from DigitalTwin.visualization.scene_builder import ReservoirSceneBuilder
+        from DigitalTwin.visualization.subsurface_renderer import SubsurfaceRenderer
         
-        # Load corner-point grid from H5 (contains 'corners' dataset)
+        # Load corner-point grid from H5
         cpg = None
         cpg_path = _ROM_DIR / "sr3_batch_output" / "corner_point_grid.h5"
         if cpg_path.exists():
@@ -5324,7 +5325,7 @@ class InteractiveVisualizationDashboard:
                 corners = hf["corners"][:]
             cpg = CornerPointGrid(corners, z_exaggeration=30.0, negate_y=True)
         
-        # Resolve the active mask from dashboard attributes
+        # Resolve the active mask
         active_mask = None
         if self.use_masking_checkbox.value and self.masks_loaded_successfully:
             if self.mask_type == 'global' and self.active_mask_3d is not None:
@@ -5334,20 +5335,9 @@ class InteractiveVisualizationDashboard:
                 if act_idx < self.active_mask_4d.shape[0]:
                     active_mask = self.active_mask_4d[act_idx]
         
-        builder = ReservoirSceneBuilder(
-            nx=self.Nx, ny=self.Ny, nz=self.Nz,
-            active_mask=active_mask,
-            corner_point_grid=cpg,
+        renderer = SubsurfaceRenderer(
+            self.Nx, self.Ny, self.Nz, corner_point_grid=cpg
         )
-        
-        # Override channel map to match our channel ordering
-        builder.channel_map = {}
-        for i, ch_key in enumerate(self.channel_names):
-            dt_name = {
-                "SG": "gas_saturation", "PRES": "pressure",
-                "PERMI": "permeability", "POROS": "porosity",
-            }.get(ch_key.upper(), ch_key.lower())
-            builder.channel_map[dt_name] = i
         
         actual_case_idx = self.test_case_indices[case_idx]
         field_key = self.field_keys[field_idx]
@@ -5359,83 +5349,59 @@ class InteractiveVisualizationDashboard:
         }
         dt_field_name = dt_field_map.get(field_key, "pressure")
         
-        # Build denormalized spatial arrays: (n_channels, Nx, Ny, Nz)
-        pred_raw = self.state_pred[case_idx, timestep_idx].cpu().detach().numpy()
-        true_raw = self.state_seq_true_aligned[case_idx, :, timestep_idx].cpu().numpy()
-        pred_denorm = np.zeros_like(pred_raw)
-        true_denorm = np.zeros_like(true_raw)
-        for i, ch_key in enumerate(self.channel_names):
-            pred_denorm[i] = self._denormalize_field_data(pred_raw[i], ch_key)
-            true_denorm[i] = self._denormalize_field_data(true_raw[i], ch_key)
+        # Get single-channel field data
+        pred_field = self.state_pred[case_idx, timestep_idx, field_idx].cpu().detach().numpy()
+        true_field = self.state_seq_true_aligned[case_idx, field_idx, timestep_idx].cpu().numpy()
+        pred_field = self._denormalize_field_data(pred_field, field_key)
+        true_field = self._denormalize_field_data(true_field, field_key)
         
-        # Debug: log key info to file
-        _dbg = _ROM_DIR / "animation_debug.log"
-        with open(_dbg, "a") as _f:
-            _f.write(f"  channel_names={self.channel_names}\n")
-            _f.write(f"  channel_map={builder.channel_map}\n")
-            _f.write(f"  field_key={field_key}, dt_field_name={dt_field_name}\n")
-            _f.write(f"  pred_denorm shape={pred_denorm.shape}, range=[{pred_denorm.min():.4f}, {pred_denorm.max():.4f}]\n")
-            _f.write(f"  true_denorm shape={true_denorm.shape}, range=[{true_denorm.min():.4f}, {true_denorm.max():.4f}]\n")
-            _f.write(f"  active_mask={'None' if active_mask is None else str(active_mask.shape)}\n")
-            _f.write(f"  cpg={'loaded' if cpg is not None else 'None'}\n")
-            _f.write(f"  grid n_cells={builder.subsurface.grid.n_cells}\n")
-        
-        # Build Plotly figures using the DT renderer
-        fig_pred = builder.build_main_figure(
-            pred_denorm, field_name=dt_field_name,
-            camera_preset="cross_section_yz",
-        )
-        fig_true = builder.build_main_figure(
-            true_denorm, field_name=dt_field_name,
-            camera_preset="cross_section_yz",
-        )
-        
-        with open(_dbg, "a") as _f:
-            _f.write(f"  fig_pred traces={len(fig_pred.data)}, fig_true traces={len(fig_true.data)}\n")
+        # Unified color range
+        pred_vals = pred_field[active_mask] if active_mask is not None else pred_field
+        true_vals = true_field[active_mask] if active_mask is not None else true_field
+        all_vals = np.concatenate([pred_vals.ravel(), true_vals.ravel()])
+        vmin, vmax = float(np.nanmin(all_vals)), float(np.nanmax(all_vals))
+        min_span = {"gas_saturation": 0.05, "pressure": 50.0,
+                     "permeability": 10.0, "porosity": 0.01}.get(dt_field_name, 1e-6)
+        if vmax - vmin < min_span:
+            mid = (vmin + vmax) / 2
+            vmin, vmax = mid - min_span / 2, mid + min_span / 2
         
         panel_w, panel_h = 600, 500
-        fig_pred.update_layout(width=panel_w, height=panel_h)
-        fig_true.update_layout(width=panel_w, height=panel_h)
         
-        # Export each panel to PNG via system Python's kaleido
-        # (the conda env kaleido binary can't render complex Mesh3d)
-        import subprocess, tempfile
-        
-        def _render_plotly_to_png(fig_obj, width, height):
-            """Render a Plotly figure to PNG bytes using system Python's kaleido."""
-            tmp_json = tempfile.NamedTemporaryFile(
-                mode='w', suffix='.json', delete=False, dir=str(_ROM_DIR))
-            tmp_json.write(fig_obj.to_json())
-            tmp_json.close()
+        def _render_panel(field_data, label):
+            """Render a single 3D panel to PIL Image using PyVista offscreen."""
+            pv.OFF_SCREEN = True
+            mesh = renderer.render(field_data, dt_field_name, active_mask)
+            if mesh is None or mesh.n_points == 0:
+                img = Image.new("RGB", (panel_w, panel_h), color=(10, 10, 26))
+                return img
             
-            render_code = (
-                "import json,sys;"
-                "from kaleido.scopes.plotly import PlotlyScope;"
-                "s=PlotlyScope();"
-                f"f=open(r'{tmp_json.name}');"
-                "d=json.load(f);f.close();"
-                f"sys.stdout.buffer.write(s.transform(d,format='png',width={width},height={height},scale=1.0))"
+            plotter = pv.Plotter(off_screen=True, window_size=[panel_w, panel_h])
+            plotter.set_background([10/255, 10/255, 26/255])
+            
+            plotter.add_mesh(
+                mesh, scalars=dt_field_name,
+                cmap="jet", clim=[vmin, vmax],
+                show_scalar_bar=True,
+                scalar_bar_args=dict(
+                    title=field_name, color="white",
+                    title_font_size=12, label_font_size=10,
+                    position_x=0.85, position_y=0.1, height=0.7, width=0.08
+                )
             )
             
-            # Try system Python first, fall back to current
-            sys_py = r"C:\ProgramData\Anaconda3\python.exe"
-            if not os.path.exists(sys_py):
-                sys_py = sys.executable
+            # Side view camera
+            plotter.view_yz()
+            plotter.camera.elevation = 20
+            plotter.camera.azimuth = -30
+            plotter.camera.zoom(1.2)
             
-            result = subprocess.run(
-                [sys_py, "-c", render_code],
-                capture_output=True, timeout=60
-            )
-            os.unlink(tmp_json.name)
-            
-            if result.returncode != 0 or len(result.stdout) < 100:
-                raise RuntimeError(f"Kaleido render failed: {result.stderr[:300]}")
-            return result.stdout
+            img_arr = plotter.screenshot(return_img=True)
+            plotter.close()
+            return Image.fromarray(img_arr)
         
-        img_pred = Image.open(io.BytesIO(
-            _render_plotly_to_png(fig_pred, panel_w, panel_h))).copy()
-        img_true = Image.open(io.BytesIO(
-            _render_plotly_to_png(fig_true, panel_w, panel_h))).copy()
+        img_pred = _render_panel(pred_field, "Predicted")
+        img_true = _render_panel(true_field, "True")
         
         # Stitch side-by-side with title and labels
         gap = 20
@@ -5445,11 +5411,9 @@ class InteractiveVisualizationDashboard:
         canvas_h = title_h + img_pred.height + label_h
         canvas = Image.new("RGB", (canvas_w, canvas_h), color=(10, 10, 26))
         
-        # Paste panels
         canvas.paste(img_pred, (0, title_h))
         canvas.paste(img_true, (img_pred.width + gap, title_h))
         
-        # Draw text
         draw = ImageDraw.Draw(canvas)
         try:
             font_title = ImageFont.truetype("arial.ttf", 20)
