@@ -5157,12 +5157,20 @@ class InteractiveVisualizationDashboard:
             """Animation loop with GIF creation"""
             gif_frames = []  # Store frames for GIF creation
             
+            # Debug logging
+            debug_log = _ROM_DIR / "animation_debug.log"
+            with open(debug_log, "w") as f:
+                f.write(f"Animation started. num_tstep={self.num_tstep}, running={self.animation_running}\n")
+            
             try:
                 case_idx = self.anim_case_slider.value
                 layer_idx = self.anim_layer_slider.value
                 field_idx = self.anim_field_dropdown.value
                 speed = self.animation_speed_slider.value
                 anim_mode = self.anim_mode_dropdown.value
+                
+                with open(debug_log, "a") as f:
+                    f.write(f"Params: case={case_idx}, layer={layer_idx}, field={field_idx}, mode={anim_mode}\n")
                 
                 # Create output directory for GIFs
                 gif_dir = _ROM_DIR / "animation_gifs"
@@ -5176,6 +5184,9 @@ class InteractiveVisualizationDashboard:
                 gif_filename = gif_dir / f"animation_case{actual_case_idx}_{mode_str}_{field_name}_{timestamp}.gif"
                 
                 for timestep_idx in range(self.num_tstep):
+                    with open(debug_log, "a") as f:
+                        f.write(f"Loop {timestep_idx}: running={self.animation_running}\n")
+                        
                     if not self.animation_running:
                         break
                         
@@ -5188,9 +5199,13 @@ class InteractiveVisualizationDashboard:
                         clear_output(wait=True)
                         
                         if "3D" in anim_mode:
+                            with open(debug_log, "a") as f:
+                                f.write(f"  Creating 3D frame {timestep_idx}\n")
                             # 3D Mode
                             fig = self._create_3d_animation_frame(case_idx, field_idx, timestep_idx)
                             
+                            with open(debug_log, "a") as f:
+                                f.write(f"  Writing image to buffer {timestep_idx}\n")
                             # Capture frame for GIF
                             buf = io.BytesIO()
                             fig.write_image(buf, format='png', scale=1.0)
@@ -5198,9 +5213,13 @@ class InteractiveVisualizationDashboard:
                             img = Image.open(buf)
                             gif_frames.append(img)
                             
+                            with open(debug_log, "a") as f:
+                                f.write(f"  Displaying image {timestep_idx}\n")
                             # Display the static image in the notebook
                             display(img)
                         else:
+                            with open(debug_log, "a") as f:
+                                f.write(f"  Creating 2D frame {timestep_idx}\n")
                             # 2D Mode
                             fig = self._create_animation_frame_with_capture(case_idx, layer_idx, field_idx, timestep_idx)
                             
@@ -5223,6 +5242,9 @@ class InteractiveVisualizationDashboard:
                     # Wait for next frame
                     time.sleep(speed)
                 
+                with open(debug_log, "a") as f:
+                    f.write(f"Loop finished. frames={len(gif_frames)}, running={self.animation_running}\n")
+                    
                 # Create and save GIF if animation completed
                 if self.animation_running and len(gif_frames) > 0:
                     self.animation_status.value = 'Animation Status: Saving GIF...'
@@ -5245,6 +5267,10 @@ class InteractiveVisualizationDashboard:
                         self.animation_status.value = 'Animation Status: Stopped'
                         
             except Exception as e:
+                import traceback
+                err_msg = traceback.format_exc()
+                with open(debug_log, "a") as f:
+                    f.write(f"EXCEPTION: {err_msg}\n")
                 self.animation_status.value = f'Animation Status: Error - {str(e)}'
                 print(f"Animation error: {e}")
             finally:
