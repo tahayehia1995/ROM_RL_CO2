@@ -5397,15 +5397,45 @@ class InteractiveVisualizationDashboard:
         fig_pred.update_layout(width=panel_w, height=panel_h)
         fig_true.update_layout(width=panel_w, height=panel_h)
         
-        # Export each panel to PNG via kaleido's PlotlyScope directly
-        from kaleido.scopes.plotly import PlotlyScope
-        scope = PlotlyScope()
+        # Export each panel to PNG via system Python's kaleido
+        # (the conda env kaleido binary can't render complex Mesh3d)
+        import subprocess, tempfile
         
-        img_bytes_pred = scope.transform(fig_pred, format="png", scale=1.0)
-        img_pred = Image.open(io.BytesIO(img_bytes_pred)).copy()
+        def _render_plotly_to_png(fig_obj, width, height):
+            """Render a Plotly figure to PNG bytes using system Python's kaleido."""
+            tmp_json = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.json', delete=False, dir=str(_ROM_DIR))
+            tmp_json.write(fig_obj.to_json())
+            tmp_json.close()
+            
+            render_code = (
+                "import json,sys;"
+                "from kaleido.scopes.plotly import PlotlyScope;"
+                "s=PlotlyScope();"
+                f"f=open(r'{tmp_json.name}');"
+                "d=json.load(f);f.close();"
+                f"sys.stdout.buffer.write(s.transform(d,format='png',width={width},height={height},scale=1.0))"
+            )
+            
+            # Try system Python first, fall back to current
+            sys_py = r"C:\ProgramData\Anaconda3\python.exe"
+            if not os.path.exists(sys_py):
+                sys_py = sys.executable
+            
+            result = subprocess.run(
+                [sys_py, "-c", render_code],
+                capture_output=True, timeout=60
+            )
+            os.unlink(tmp_json.name)
+            
+            if result.returncode != 0 or len(result.stdout) < 100:
+                raise RuntimeError(f"Kaleido render failed: {result.stderr[:300]}")
+            return result.stdout
         
-        img_bytes_true = scope.transform(fig_true, format="png", scale=1.0)
-        img_true = Image.open(io.BytesIO(img_bytes_true)).copy()
+        img_pred = Image.open(io.BytesIO(
+            _render_plotly_to_png(fig_pred, panel_w, panel_h))).copy()
+        img_true = Image.open(io.BytesIO(
+            _render_plotly_to_png(fig_true, panel_w, panel_h))).copy()
         
         # Stitch side-by-side with title and labels
         gap = 20
