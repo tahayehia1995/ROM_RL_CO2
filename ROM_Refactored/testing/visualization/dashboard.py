@@ -5295,6 +5295,10 @@ class InteractiveVisualizationDashboard:
     
     def _stop_animation_on_change(self, change):
         """Stop animation when controls change to prevent dashboard issues"""
+        # Ignore spurious sync events where the value hasn't actually changed
+        if 'old' in change and 'new' in change and change['old'] == change['new']:
+            return
+            
         if hasattr(self, 'animation_running') and self.animation_running:
             self.animation_running = False
             self.play_button.disabled = False
