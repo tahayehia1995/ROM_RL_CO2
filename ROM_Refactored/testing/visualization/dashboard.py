@@ -2119,6 +2119,13 @@ class InteractiveVisualizationDashboard:
             style={'description_width': 'initial'}
         )
         
+        self.anim_mode_dropdown = widgets.Dropdown(
+            options=['2D Layer', '3D Volume (Side View)'],
+            value='2D Layer',
+            description='View Mode:',
+            style={'description_width': 'initial'}
+        )
+        
         self.play_button = widgets.Button(
             description='▶️ Play Animation',
             button_style='success',
@@ -2154,6 +2161,7 @@ class InteractiveVisualizationDashboard:
         self.anim_case_slider.observe(self._stop_animation_on_change, names='value')
         self.anim_layer_slider.observe(self._stop_animation_on_change, names='value')
         self.anim_field_dropdown.observe(self._stop_animation_on_change, names='value')
+        self.anim_mode_dropdown.observe(self._stop_animation_on_change, names='value')
         
         # Animation control variables
         self.animation_running = False
@@ -2165,6 +2173,7 @@ class InteractiveVisualizationDashboard:
             self.anim_case_slider,
             self.anim_layer_slider,
             self.anim_field_dropdown,
+            self.anim_mode_dropdown,
             widgets.HBox([self.play_button, self.stop_button]),
             self.animation_speed_slider,
             self.animation_status
@@ -5132,6 +5141,8 @@ class InteractiveVisualizationDashboard:
         """Start time evolution animation and create GIF"""
         import threading
         import time
+        import io
+        from PIL import Image
         from IPython.display import clear_output, display
         
         if self.animation_running:
@@ -5151,6 +5162,7 @@ class InteractiveVisualizationDashboard:
                 layer_idx = self.anim_layer_slider.value
                 field_idx = self.anim_field_dropdown.value
                 speed = self.animation_speed_slider.value
+                anim_mode = self.anim_mode_dropdown.value
                 
                 # Create output directory for GIFs
                 gif_dir = _ROM_DIR / "animation_gifs"
@@ -5160,7 +5172,8 @@ class InteractiveVisualizationDashboard:
                 actual_case_idx = self.test_case_indices[case_idx]
                 field_name = self.field_names[field_idx]
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                gif_filename = gif_dir / f"animation_case{actual_case_idx}_layer{layer_idx}_{field_name}_{timestamp}.gif"
+                mode_str = "3D" if "3D" in anim_mode else f"2D_layer{layer_idx}"
+                gif_filename = gif_dir / f"animation_case{actual_case_idx}_{mode_str}_{field_name}_{timestamp}.gif"
                 
                 for timestep_idx in range(self.num_tstep):
                     if not self.animation_running:
@@ -5174,24 +5187,38 @@ class InteractiveVisualizationDashboard:
                     with self.animation_output:
                         clear_output(wait=True)
                         
-                        # Create the plot
-                        fig = self._create_animation_frame_with_capture(case_idx, layer_idx, field_idx, timestep_idx)
-                        
-                        # Display the plot
-                        display(fig)
-                        
-                        # Capture frame for GIF
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-                        buf.seek(0)
-                        gif_frames.append(Image.open(buf))
-                        
-                        # Close the figure to prevent memory issues
-                        try:
-                            plt.close(fig)
-                        except (AttributeError, RuntimeError):
-                            # If closing fails (e.g., manager is None), just continue
-                            pass
+                        if "3D" in anim_mode:
+                            # 3D Mode
+                            fig = self._create_3d_animation_frame(case_idx, field_idx, timestep_idx)
+                            
+                            # Capture frame for GIF
+                            buf = io.BytesIO()
+                            fig.write_image(buf, format='png', scale=1.0)
+                            buf.seek(0)
+                            img = Image.open(buf)
+                            gif_frames.append(img)
+                            
+                            # Display the static image in the notebook
+                            display(img)
+                        else:
+                            # 2D Mode
+                            fig = self._create_animation_frame_with_capture(case_idx, layer_idx, field_idx, timestep_idx)
+                            
+                            # Display the plot
+                            display(fig)
+                            
+                            # Capture frame for GIF
+                            buf = io.BytesIO()
+                            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                            buf.seek(0)
+                            gif_frames.append(Image.open(buf))
+                            
+                            # Close the figure to prevent memory issues
+                            try:
+                                import matplotlib.pyplot as plt
+                                plt.close(fig)
+                            except (AttributeError, RuntimeError):
+                                pass
                     
                     # Wait for next frame
                     time.sleep(speed)
@@ -5248,6 +5275,95 @@ class InteractiveVisualizationDashboard:
             self.stop_button.disabled = True
             self.animation_status.value = 'Animation Status: Stopped (Control Changed)'
     
+    def _create_3d_animation_frame(self, case_idx, field_idx, timestep_idx):
+        """Create 3D animation frame returning Plotly figure"""
+        import sys
+        import numpy as np
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        
+        # Ensure DigitalTwin is in path
+        dt_path = str(_ROM_DIR.parent)
+        if dt_path not in sys.path:
+            sys.path.append(dt_path)
+            
+        from DigitalTwin.visualization.scene_builder import ReservoirSceneBuilder
+        from DigitalTwin.visualization.corner_point_grid import CornerPointGrid
+        
+        # Load CPG if available
+        cpg = None
+        cpg_path = _ROM_DIR / "sr3_batch_output" / "corner_point_grid.h5"
+        if cpg_path.exists():
+            cpg = CornerPointGrid.from_h5(str(cpg_path))
+            
+        # Initialize Scene Builder
+        builder = ReservoirSceneBuilder(
+            nx=self.Nx, ny=self.Ny, nz=self.Nz,
+            active_mask=self.mask_data,
+            corner_point_grid=cpg
+        )
+        
+        # Override channel map to match our data
+        builder.channel_map = {}
+        for i, ch_key in enumerate(self.channel_names):
+            dt_name = {"SG": "gas_saturation", "PRES": "pressure", "PERMI": "permeability", "POROS": "porosity"}.get(ch_key.upper(), ch_key.lower())
+            builder.channel_map[dt_name] = i
+            
+        # Get current selections
+        actual_case_idx = self.test_case_indices[case_idx]
+        field_key = self.field_keys[field_idx]
+        field_name = self.field_names[field_idx]
+        current_year = self.start_year + timestep_idx
+        
+        # Get data
+        pred_data = self.state_pred[case_idx, timestep_idx].cpu().detach().numpy()
+        true_data = self.state_seq_true_aligned[case_idx, :, timestep_idx].cpu().numpy()
+        
+        # Denormalize all channels
+        pred_data_denorm = np.zeros_like(pred_data)
+        true_data_denorm = np.zeros_like(true_data)
+        for i, ch_key in enumerate(self.channel_names):
+            pred_data_denorm[i] = self._denormalize_field_data(pred_data[i], ch_key)
+            true_data_denorm[i] = self._denormalize_field_data(true_data[i], ch_key)
+            
+        # Build individual figures
+        dt_field_map = {"SG": "gas_saturation", "PRES": "pressure", "PERMI": "permeability", "POROS": "porosity"}
+        dt_field_name = dt_field_map.get(field_key, "pressure")
+        
+        fig_pred = builder.build_main_figure(pred_data_denorm, field_name=dt_field_name, camera_preset="cross_section_yz")
+        fig_true = builder.build_main_figure(true_data_denorm, field_name=dt_field_name, camera_preset="cross_section_yz")
+        
+        # Combine into subplots
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{'type': 'scene'}, {'type': 'scene'}]],
+            subplot_titles=(f"Predicted {field_name}", f"True {field_name}")
+        )
+        
+        for trace in fig_pred.data:
+            # Only show colorbar on the second plot to avoid overlap
+            if hasattr(trace, 'showscale'):
+                trace.showscale = False
+            fig.add_trace(trace, row=1, col=1)
+            
+        for trace in fig_true.data:
+            fig.add_trace(trace, row=1, col=2)
+            
+        # Update layout
+        scene_layout = fig_pred.layout.scene.to_plotly_json()
+        fig.update_layout(
+            title=f'Case {actual_case_idx} - Year {current_year}',
+            scene=scene_layout,
+            scene2=scene_layout,
+            paper_bgcolor="rgb(10,10,26)",
+            font=dict(color="white"),
+            height=600,
+            width=1200,
+            margin=dict(l=0, r=0, t=50, b=0)
+        )
+        
+        return fig
+        
     def _create_animation_frame_with_capture(self, case_idx, layer_idx, field_idx, timestep_idx):
         """Create animation frame and return figure for GIF capture - matches spatial tab styling exactly"""
         import matplotlib.pyplot as plt
