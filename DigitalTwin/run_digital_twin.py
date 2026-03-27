@@ -19,7 +19,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Path setup – identical pattern to RL_Refactored/utilities/__init__.py
 # ---------------------------------------------------------------------------
-_THIS_DIR = Path(__file__).resolve().parent           # DigitalTwin/
+try:
+    _THIS_DIR = Path(__file__).resolve().parent       # DigitalTwin/
+except NameError:
+    _THIS_DIR = Path(os.getcwd())
+    if _THIS_DIR.name != "DigitalTwin":
+        _THIS_DIR = _THIS_DIR / "DigitalTwin"
 _PROJECT_ROOT = _THIS_DIR.parent                      # ROM-Optimization/
 
 _ROM_DIR = _PROJECT_ROOT / "ROM_Refactored"

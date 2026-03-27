@@ -21,9 +21,9 @@ _DARK = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(22,33,62,0.8)",
     font=dict(color="#e0e0e0", size=10),
-    margin=dict(l=40, r=10, t=30, b=30),
+    margin=dict(l=45, r=15, t=35, b=35),
     legend=dict(orientation="h", y=-0.25),
-    height=180,
+    height=220,
 )
 
 _WELL_NAMES_PROD = ["P1", "P2", "P3"]
@@ -213,7 +213,7 @@ def register_callbacks(app, engine):
                 controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
 
             try:
-                result = engine.step(controls)
+                result = engine.step(controls, rl_source=rl_active)
                 state_3d = result["state_3d"]
                 obs = result["well_observations"]
             except Exception:

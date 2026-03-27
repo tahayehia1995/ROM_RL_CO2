@@ -569,74 +569,76 @@ def save_normalization_parameters_for_rl(training_norm_params):
         print(f"❌ Error saving normalization parameters: {e}")
         return None
 
+def _load_rom_norm_params_cached():
+    """Load the ROM training normalization JSON (cached after first call)."""
+    if hasattr(_load_rom_norm_params_cached, "_cache"):
+        return _load_rom_norm_params_cached._cache
+    import glob as _glob
+    rom_proc = str(Path(__file__).resolve().parent.parent.parent / "ROM_Refactored" / "processed_data")
+    hits = sorted(_glob.glob(os.path.join(rom_proc, "normalization_parameters_*.json")),
+                  key=lambda p: os.path.getmtime(p), reverse=True)
+    if not hits:
+        _load_rom_norm_params_cached._cache = {}
+        return {}
+    import json as _json
+    with open(hits[0]) as f:
+        cfg = _json.load(f)
+    merged = {}
+    for section in ("spatial_channels", "control_variables", "observation_variables"):
+        for var, info in cfg.get(section, {}).items():
+            p = info["parameters"]
+            cleaned = {}
+            for k, v in p.items():
+                try:
+                    cleaned[k] = float(v) if isinstance(v, str) else v
+                except (ValueError, TypeError):
+                    cleaned[k] = v
+            merged[var] = cleaned
+    print(f"      ROM norm params loaded from {hits[0]}")
+    _load_rom_norm_params_cached._cache = merged
+    return merged
+
+
 def apply_dashboard_scaling(data, state_name, rl_config, device):
+    """Normalize spatial/timeseries data using the ROM training parameters.
+
+    Uses the ROM normalization JSON (same file as the Testing Dashboard
+    and Digital Twin) so that the encoded Z0 matches what the model was
+    trained on.  ALL cells are normalized uniformly — no active-cell
+    filtering — matching the ROM data-preprocessing pipeline exactly.
     """
-    Apply EXACT SAME normalization as corrected_model_test.py
-    NO FALLBACKS - uses training-only parameters for perfect consistency
-    
-    Args:
-        data: input tensor to scale
-        state_name: name of the state variable (e.g., 'SW', 'PRES')  
-        rl_config: dashboard configuration containing training normalization params
-        device: PyTorch device
-        
-    Returns:
-        Scaled tensor using EXACT same training normalization as corrected_model_test.py
-    """
-    print(f"      🔧 Applying EXACT training normalization for {state_name}...")
-    
-    # Get TRAINING-ONLY normalization parameters (EXACT same as corrected_model_test.py)
-    training_params = rl_config.get('training_only_normalization_params', {})
-    
-    if state_name not in training_params:
-        raise ValueError(f"❌ No training normalization parameters for {state_name}! This should not happen.")
-    
-    norm_params = training_params[state_name]
-    param_min = norm_params['min']
-    param_max = norm_params['max']
-    
-    print(f"      ✅ Using EXACT training normalization: [{param_min:.8f}, {param_max:.8f}]")
-    
-    # Apply EXACT same normalization logic as corrected_model_test.py
-    def apply_training_normalization(data, norm_params):
-        """Apply normalization using training parameters - EXACT COPY from corrected_model_test.py"""
-        data_min = norm_params['min']
-        data_max = norm_params['max']
-        return (data - data_min) / (data_max - data_min)
-    
-    # Handle inactive cells for spatial data (EXACT same logic as corrected_model_test.py)
-    if state_name in ['SW', 'SG', 'PRES', 'POROS', 'PERMI', 'PERMJ', 'PERMK']:
-        # Identify active cells (same logic as corrected_model_test.py)
-        active_mask = data > 0.0
-        
-        print(f"      • Active cells: {torch.sum(active_mask).item():,} / {data.numel():,}")
-        
-        # Start with data copy to preserve inactive cells
-        scaled_data = data.clone()
-        
-        if param_max > param_min:
-            # Apply training normalization
-            normalized_data = apply_training_normalization(data, norm_params)
-            # Only update active cells
-            scaled_data[active_mask] = normalized_data[active_mask]
-            # Inactive cells remain unchanged
-            
-            print(f"      ✅ EXACT training normalization applied to active cells")
-        else:
-            print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-        
-        return scaled_data.to(device)
-    
+    rom_params = _load_rom_norm_params_cached()
+
+    if state_name in rom_params:
+        norm_params = rom_params[state_name]
     else:
-        # For timeseries data, apply directly (EXACT same as corrected_model_test.py)
+        training_params = rl_config.get('training_only_normalization_params', {})
+        if state_name not in training_params:
+            raise ValueError(f"No normalization parameters for {state_name}")
+        norm_params = training_params[state_name]
+
+    ntype = norm_params.get("type", "minmax")
+    print(f"      Normalizing {state_name} ({ntype}) — all cells uniformly")
+
+    if ntype == "log":
+        import math
+        eps = norm_params.get("epsilon", 1e-8)
+        shift = norm_params.get("data_shift", 0)
+        log_min = norm_params["log_min"]
+        log_max = norm_params["log_max"]
+        log_data = torch.log(data - shift + eps)
+        scaled_data = (log_data - log_min) / (log_max - log_min)
+    elif ntype == "none":
+        scaled_data = data.clone()
+    else:
+        param_min = norm_params["min"]
+        param_max = norm_params["max"]
         if param_max > param_min:
-            scaled_data = apply_training_normalization(data, norm_params)
-            print(f"      ✅ EXACT training normalization applied to timeseries data")
+            scaled_data = (data - param_min) / (param_max - param_min)
         else:
-            scaled_data = data.clone()
-            print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-        
-        return scaled_data.to(device)
+            scaled_data = torch.zeros_like(data)
+
+    return scaled_data.to(device)
 
 def create_state_t_seq_from_dashboard(rl_config, state_folder, device, specific_case_idx=None):
     """
@@ -1762,8 +1764,10 @@ class RLConfigurationDashboard:
         if norm_match:
             info['norm_type'] = 'batchnorm' if norm_match.group(1) == 'ba' else 'gdn'
         
-        # Detect transition type (trnCLRU, trnFNO, etc.)
-        trn_match = re.search(r'_trn([A-Z]+)', filename)
+        # Detect transition type (trnCLRU, trnMAMBA2, etc.)
+        trn_match = re.search(r'_trn([A-Za-z0-9_]+?)(?=\.|\b|_(?:run|bs|ld|ns|ch|sch|rb|norm|ehd|fft|mask|mm|gnn))', filename)
+        if not trn_match:
+            trn_match = re.search(r'_trn([A-Z0-9_]+)', filename)
         if trn_match:
             info['transition_type'] = trn_match.group(1).lower()
         
@@ -1961,38 +1965,73 @@ class RLConfigurationDashboard:
 
     def _detect_transition_type_from_weights(self, transition_file):
         """Detect transition model type from saved weight keys.
-        
-        Returns the type string or None if the file cannot be inspected.
+
+        Comprehensive detection covering all supported transition architectures.
+        Mirrors ``DigitalTwinEngine._detect_transition_type_from_keys``.
         """
         try:
             import torch
             sd = torch.load(transition_file, map_location='cpu', weights_only=False)
-            has_selector = any(k.startswith('selector.') for k in sd)
-            has_nu_layer = 'nu_layer.weight' in sd
-            has_alpha_layer = 'alpha_layer.weight' in sd
-            has_trans_encoder = any(k.startswith('trans_encoder.') for k in sd)
-            has_At_layer = 'At_layer.weight' in sd
-            has_V_real = 'V_real' in sd
-            has_U_real = 'U_real_layer.weight' in sd
-            has_K_param = 'K' in sd and not has_At_layer
-            has_A_ct = 'A_skew_params' in sd
-            has_attractor = any(k.startswith('attractor_net.') for k in sd)
-            if has_attractor and has_alpha_layer:
-                return 'accss'
-            if has_A_ct:
-                return 'ct_koopman'
-            if has_K_param and not has_selector:
-                return 'koopman'
-            if has_selector and has_alpha_layer and has_V_real:
-                return 's5'
-            if has_selector and has_alpha_layer and has_U_real:
-                return 's4d_dplr'
-            if has_selector and has_alpha_layer:
-                return 's4d'
-            if has_selector and has_nu_layer:
-                return 'clru'
-            if has_trans_encoder and has_At_layer:
-                return 'linear'
+            if not isinstance(sd, dict):
+                return None
+            keys = set(sd.keys())
+            has = lambda pat: any(pat in k for k in keys)
+
+            if "sindy_coefficients" in keys:
+                return "sindy"
+            if has("cde_func.net."):
+                return "neural_cde"
+            if has("drift_net.") and has("diffusion_net."):
+                return "latent_sde"
+            if has("temporal_transformer."):
+                return "transformer"
+            if has("branch_net.") and has("trunk_net."):
+                return "deeponet"
+            if has("spectral_gates.") and has("rnn_lambda_real."):
+                return "skolr"
+            if "ren_H" in keys:
+                return "ren"
+            if "K" in keys and has("aft.aft_W_q"):
+                return "koopman_aft"
+            if "U_skew_params" in keys and "sigma_raw" in keys:
+                return "dissipative_koopman"
+            if "A_bilinear" in keys:
+                return "bilinear_koopman"
+            if has("lift_net.") and "exp_r_real" in keys:
+                return "isfno"
+            if "A_skew_params" in keys:
+                return "ct_koopman"
+            if has("H_net.") and "B_ctrl" in keys:
+                return "hamiltonian"
+            if has("lstm_cells."):
+                return "lstm"
+            if has("gru_cells."):
+                return "gru"
+            if "A_log" in keys and "delta_proj.weight" in keys and "out_proj.weight" in keys:
+                return "mamba2"
+            if "A_log" in keys and "delta_proj.weight" in keys:
+                return "mamba"
+            if has("selector.") and "Kt_layer.weight" in keys:
+                return "deep_koopman"
+            if ("eig_raw" in keys or "eig_mag_raw" in keys) and not has("selector."):
+                return "stable_koopman"
+            if "K" in keys and "At_layer.weight" not in keys:
+                return "koopman"
+            if has("attractor_net.") and "alpha_layer.weight" in keys:
+                return "accss"
+            if has("selector.") and "alpha_layer.weight" in keys and "V_real" in keys:
+                return "s5"
+            if has("selector.") and "alpha_layer.weight" in keys and "U_real_layer.weight" in keys:
+                return "s4d_dplr"
+            if has("selector.") and "alpha_layer.weight" in keys:
+                return "s4d"
+            if has("selector.") and "nu_layer.weight" in keys:
+                return "clru"
+            if has("ode_func.net."):
+                return "nonlinear"
+            if has("trans_encoder.") and "At_layer.weight" in keys:
+                return "linear"
+            return "linear"
         except Exception:
             pass
         return None

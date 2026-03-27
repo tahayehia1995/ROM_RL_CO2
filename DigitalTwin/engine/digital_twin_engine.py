@@ -631,37 +631,64 @@ class DigitalTwinEngine:
     # ==================================================================
     # Action mapping / observation denormalization
     # ==================================================================
-    def _map_action_to_rom(self, action_01: torch.Tensor) -> torch.Tensor:
-        """Map slider [0,1] directly to ROM normalized controls [0,1].
+    def _map_action_to_rom(self, action_01: torch.Tensor,
+                           rl_source: bool = False) -> torch.Tensor:
+        """Map [0,1] controls to ROM-normalized space.
 
-        The sliders already represent the full ROM training range, so the
-        normalized control value equals the slider value.  This avoids the
-        lossy compression that occurred when first mapping to the RL
-        restricted physical range and then re-normalizing.
+        Two paths depending on the source of the action:
+
+        * **Manual sliders** (``rl_source=False``): the slider already
+          represents the full ROM training range, so its value IS the
+          ROM-normalized control (identity mapping).
+
+        * **RL agent** (``rl_source=True``): the policy was trained with
+          restricted action ranges.  Its [0,1] output maps to a narrow
+          physical sub-range first, then gets re-normalized to the full
+          ROM training range — exactly matching the RL environment's
+          ``_map_dashboard_action_to_rom_input``.
         """
-        return action_01.clone()
+        if not rl_source:
+            return action_01.clone()
 
-    def _action_to_physical(self, action_01: torch.Tensor) -> torch.Tensor:
-        """Convert [0,1] slider values to physical units for display/logging.
+        bhp_lo = self.restricted_action_ranges["producer_bhp"]["min"]
+        bhp_hi = self.restricted_action_ranges["producer_bhp"]["max"]
+        gas_lo = self.restricted_action_ranges["gas_injection"]["min"]
+        gas_hi = self.restricted_action_ranges["gas_injection"]["max"]
 
-        Uses the full ROM training control ranges (BHP, GASRATSC) so that
-        0 maps to the training-data minimum and 1 maps to the maximum.
-        """
         physical = action_01.clone()
+        physical[:, 0:3] = action_01[:, 0:3] * (bhp_hi - bhp_lo) + bhp_lo
+        physical[:, 3:6] = action_01[:, 3:6] * (gas_hi - gas_lo) + gas_lo
+
+        rom = physical.clone()
         if "BHP" in self.norm_params:
             p = self.norm_params["BHP"]
-            physical[:, 0:3] = action_01[:, 0:3] * (p["max"] - p["min"]) + p["min"]
-        else:
-            bhp_lo = self.restricted_action_ranges["producer_bhp"]["min"]
-            bhp_hi = self.restricted_action_ranges["producer_bhp"]["max"]
-            physical[:, 0:3] = action_01[:, 0:3] * (bhp_hi - bhp_lo) + bhp_lo
+            rom[:, 0:3] = (physical[:, 0:3] - p["min"]) / (p["max"] - p["min"])
         if "GASRATSC" in self.norm_params:
             p = self.norm_params["GASRATSC"]
-            physical[:, 3:6] = action_01[:, 3:6] * (p["max"] - p["min"]) + p["min"]
-        else:
+            rom[:, 3:6] = (physical[:, 3:6] - p["min"]) / (p["max"] - p["min"])
+        return rom
+
+    def _action_to_physical(self, action_01: torch.Tensor,
+                            rl_source: bool = False) -> torch.Tensor:
+        """Convert [0,1] actions to physical units for display/logging.
+
+        Uses the same source distinction as ``_map_action_to_rom``:
+        manual sliders map across the full ROM training range; RL
+        actions map across the restricted RL range.
+        """
+        physical = action_01.clone()
+        if rl_source:
+            bhp_lo = self.restricted_action_ranges["producer_bhp"]["min"]
+            bhp_hi = self.restricted_action_ranges["producer_bhp"]["max"]
             gas_lo = self.restricted_action_ranges["gas_injection"]["min"]
             gas_hi = self.restricted_action_ranges["gas_injection"]["max"]
-            physical[:, 3:6] = action_01[:, 3:6] * (gas_hi - gas_lo) + gas_lo
+        else:
+            bhp_lo = float(self.norm_params.get("BHP", {}).get("min", self.restricted_action_ranges["producer_bhp"]["min"]))
+            bhp_hi = float(self.norm_params.get("BHP", {}).get("max", self.restricted_action_ranges["producer_bhp"]["max"]))
+            gas_lo = float(self.norm_params.get("GASRATSC", {}).get("min", self.restricted_action_ranges["gas_injection"]["min"]))
+            gas_hi = float(self.norm_params.get("GASRATSC", {}).get("max", self.restricted_action_ranges["gas_injection"]["max"]))
+        physical[:, 0:3] = action_01[:, 0:3] * (bhp_hi - bhp_lo) + bhp_lo
+        physical[:, 3:6] = action_01[:, 3:6] * (gas_hi - gas_lo) + gas_lo
         return physical
 
     def _denorm_obs(self, yobs: torch.Tensor) -> torch.Tensor:
@@ -786,14 +813,14 @@ class DigitalTwinEngine:
         self.state_mgr.record(state_phys, np.zeros(self.num_inj + 2 * self.num_prod), np.zeros(self.u_dim))
         return state_phys
 
-    def step(self, controls_01: np.ndarray) -> Dict:
+    def step(self, controls_01: np.ndarray, rl_source: bool = False) -> Dict:
         if self.current_spatial_state is None:
             raise RuntimeError("Call reset() before step().")
 
         self.step_index += 1
         action_01 = torch.tensor(controls_01, dtype=torch.float32).unsqueeze(0).to(self.device)
-        action_rom = self._map_action_to_rom(action_01)
-        action_phys = self._action_to_physical(action_01)
+        action_rom = self._map_action_to_rom(action_01, rl_source=rl_source)
+        action_phys = self._action_to_physical(action_01, rl_source=rl_source)
 
         dt = torch.ones(1, 1, dtype=torch.float32, device=self.device) * self.dt_value
         dummy_obs = torch.zeros(1, self.num_inj + 2 * self.num_prod, device=self.device)

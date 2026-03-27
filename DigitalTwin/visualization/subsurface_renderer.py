@@ -153,10 +153,20 @@ class SubsurfaceRenderer:
     # ------------------------------------------------------------------
     # Colour range
     # ------------------------------------------------------------------
+    _MIN_RANGES = {
+        "gas_saturation": 0.05,
+        "pressure": 50.0,
+        "permeability": 10.0,
+        "porosity": 0.01,
+    }
+
     def color_range(self, field_data: np.ndarray, field_name: str,
                     active_mask: Optional[np.ndarray] = None) -> Tuple[float, float]:
         vals = field_data[active_mask] if active_mask is not None else field_data
         vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals))
-        if vmin == vmax:
-            vmax = vmin + 1e-6
+        min_span = self._MIN_RANGES.get(field_name, 1e-6)
+        if vmax - vmin < min_span:
+            mid = (vmin + vmax) / 2
+            vmin = mid - min_span / 2
+            vmax = mid + min_span / 2
         return vmin, vmax

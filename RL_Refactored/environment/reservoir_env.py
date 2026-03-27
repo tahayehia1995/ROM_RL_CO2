@@ -539,10 +539,8 @@ class ReservoirEnvironment(object):
                 
                 next_spatial_state, yobs = self.rom.predict(inputs)
                 
-                # Clamp negative spatial values to zero (physical quantities can't be negative)
-                next_spatial_state = torch.clamp(next_spatial_state, min=0.0)
-                
-                # Update spatial state for next iteration
+                # Store raw output for next iteration (no clamp — matches ROM
+                # evaluation dashboard which feeds unclamped predictions back)
                 self.current_spatial_state = next_spatial_state
                 
                 # Encode next spatial state to latent (for RL state representation)

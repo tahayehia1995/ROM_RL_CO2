@@ -44,7 +44,7 @@ from model.training.rom_wrapper import ROMWithE2C
 HYPERPARAMETER_GRID = {
     # Existing parameters
     'batch_size': [16],
-    'n_steps': [2],  # Available processed data files
+    'n_steps': [5],  # Available processed data files
     'n_channels': [4],  # Number of channels (2 for SW/SG, 4 for SW/SG/PRES/PERMI, etc.)
     'latent_dim': [128],
     # Learning rate scheduler
@@ -86,7 +86,7 @@ HYPERPARAMETER_GRID = {
     'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
     # Transition model type
-    'transition_type': ['mamba2'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
+    'transition_type': ['mamba2','deep_koopman'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
     
     # Encoder enhancement strategies (reduce re-encoding error accumulation)
     'enable_jacobian_loss': [False],      # Contractive encoder via Jacobian regularization

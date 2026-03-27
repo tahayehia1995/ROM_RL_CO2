@@ -64,9 +64,9 @@ def build_vtk_views() -> html.Div:
         dbc.Card([
             dcc.Graph(
                 id="graph-main-3d",
-                figure=_empty_figure(500),
+                figure=_empty_figure(700),
                 config={"displayModeBar": True, "scrollZoom": True},
-                style={"width": "100%"},
+                style={"width": "100%", "height": "700px"},
             ),
         ], style={"background": "#0a0a1a", "border": "1px solid #0f3460",
                   "marginBottom": "8px"}),
@@ -80,9 +80,9 @@ def build_vtk_views() -> html.Div:
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(
                     id="graph-slice-i",
-                    figure=_empty_figure(220),
+                    figure=_empty_figure(400),
                     config={"displayModeBar": False, "scrollZoom": True},
-                    style={"width": "100%"},
+                    style={"width": "100%", "height": "400px"},
                 ),
             ], width=4),
             dbc.Col([
@@ -92,9 +92,9 @@ def build_vtk_views() -> html.Div:
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(
                     id="graph-slice-j",
-                    figure=_empty_figure(220),
+                    figure=_empty_figure(400),
                     config={"displayModeBar": False, "scrollZoom": True},
-                    style={"width": "100%"},
+                    style={"width": "100%", "height": "400px"},
                 ),
             ], width=4),
             dbc.Col([
@@ -104,9 +104,9 @@ def build_vtk_views() -> html.Div:
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(
                     id="graph-slice-k",
-                    figure=_empty_figure(220),
+                    figure=_empty_figure(400),
                     config={"displayModeBar": False, "scrollZoom": True},
-                    style={"width": "100%"},
+                    style={"width": "100%", "height": "400px"},
                 ),
             ], width=4),
         ]),

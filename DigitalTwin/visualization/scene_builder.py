@@ -151,7 +151,8 @@ class ReservoirSceneBuilder:
     # ------------------------------------------------------------------
     # Common figure layout
     # ------------------------------------------------------------------
-    def _make_layout(self, height: int = 500, camera_preset: str = "perspective_3d"):
+    def _make_layout(self, height: int = 500, camera_preset: str = "perspective_3d",
+                     zoom_out: float = 1.0):
         cam_pos, cam_up, _ = self.camera.get_preset(camera_preset)
 
         if self.cpg is not None:
@@ -162,10 +163,11 @@ class ReservoirSceneBuilder:
             diag = np.sqrt((self.nx * self.dx)**2 + (self.ny * self.dy)**2 + (self.nz * self.dz)**2)
 
         scale = 1.0 / (diag if diag > 0 else 1.0)
+        eye_scale = 2.0 * zoom_out
         eye = dict(
-            x=(cam_pos[0] - c[0]) * scale * 2,
-            y=(cam_pos[1] - c[1]) * scale * 2,
-            z=(cam_pos[2] - c[2]) * scale * 2,
+            x=(cam_pos[0] - c[0]) * scale * eye_scale,
+            y=(cam_pos[1] - c[1]) * scale * eye_scale,
+            z=(cam_pos[2] - c[2]) * scale * eye_scale,
         )
         up = dict(x=cam_up[0], y=cam_up[1], z=cam_up[2])
 
@@ -195,7 +197,7 @@ class ReservoirSceneBuilder:
         data_range = list(self.subsurface.color_range(
             field_data, field_name, self.active_mask))
 
-        fig = go.Figure(layout=self._make_layout(height=500, camera_preset=camera_preset))
+        fig = go.Figure(layout=self._make_layout(height=700, camera_preset=camera_preset))
 
         mesh = self.subsurface.render(field_data, field_name, self.active_mask)
         if mesh is not None:
@@ -234,11 +236,18 @@ class ReservoirSceneBuilder:
 
         camera_map = {"i": "cross_section_yz", "j": "cross_section_xz", "k": "top_down"}
         fig = go.Figure(layout=self._make_layout(
-            height=220, camera_preset=camera_map.get(axis, "perspective_3d"),
+            height=400, camera_preset=camera_map.get(axis, "perspective_3d"),
+            zoom_out=1.6,
         ))
 
         if mesh is not None:
-            fig.add_trace(self._pv_to_mesh3d(mesh, field_name, data_range))
+            _UNITS = {"pressure": "psi", "gas_saturation": "frac",
+                      "permeability": "mD", "porosity": "frac"}
+            label = f"{field_name.replace('_', ' ').title()} ({_UNITS.get(field_name, '')})"
+            fig.add_trace(self._pv_to_mesh3d(
+                mesh, field_name, data_range,
+                show_colorbar=True, name=label,
+            ))
 
         return fig
 
