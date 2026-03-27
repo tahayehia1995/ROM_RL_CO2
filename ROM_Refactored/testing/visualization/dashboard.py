@@ -5368,6 +5368,18 @@ class InteractiveVisualizationDashboard:
             pred_denorm[i] = self._denormalize_field_data(pred_raw[i], ch_key)
             true_denorm[i] = self._denormalize_field_data(true_raw[i], ch_key)
         
+        # Debug: log key info to file
+        _dbg = _ROM_DIR / "animation_debug.log"
+        with open(_dbg, "a") as _f:
+            _f.write(f"  channel_names={self.channel_names}\n")
+            _f.write(f"  channel_map={builder.channel_map}\n")
+            _f.write(f"  field_key={field_key}, dt_field_name={dt_field_name}\n")
+            _f.write(f"  pred_denorm shape={pred_denorm.shape}, range=[{pred_denorm.min():.4f}, {pred_denorm.max():.4f}]\n")
+            _f.write(f"  true_denorm shape={true_denorm.shape}, range=[{true_denorm.min():.4f}, {true_denorm.max():.4f}]\n")
+            _f.write(f"  active_mask={'None' if active_mask is None else str(active_mask.shape)}\n")
+            _f.write(f"  cpg={'loaded' if cpg is not None else 'None'}\n")
+            _f.write(f"  grid n_cells={builder.subsurface.grid.n_cells}\n")
+        
         # Build Plotly figures using the DT renderer
         fig_pred = builder.build_main_figure(
             pred_denorm, field_name=dt_field_name,
@@ -5377,6 +5389,9 @@ class InteractiveVisualizationDashboard:
             true_denorm, field_name=dt_field_name,
             camera_preset="cross_section_yz",
         )
+        
+        with open(_dbg, "a") as _f:
+            _f.write(f"  fig_pred traces={len(fig_pred.data)}, fig_true traces={len(fig_true.data)}\n")
         
         panel_w, panel_h = 600, 500
         fig_pred.update_layout(width=panel_w, height=panel_h)
