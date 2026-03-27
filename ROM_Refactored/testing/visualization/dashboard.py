@@ -5208,15 +5208,22 @@ class InteractiveVisualizationDashboard:
                                 f.write(f"  Writing image to buffer {timestep_idx}\n")
                             # Capture frame for GIF
                             buf = io.BytesIO()
-                            fig.write_image(buf, format='png', scale=1.0)
-                            buf.seek(0)
-                            img = Image.open(buf)
-                            gif_frames.append(img)
-                            
-                            with open(debug_log, "a") as f:
-                                f.write(f"  Displaying image {timestep_idx}\n")
-                            # Display the static image in the notebook
-                            display(img)
+                            try:
+                                fig.write_image(buf, format='png', scale=1.0)
+                                buf.seek(0)
+                                img = Image.open(buf)
+                                # Make a copy of the image so it doesn't get closed when buf is closed
+                                img_copy = img.copy()
+                                gif_frames.append(img_copy)
+                                
+                                with open(debug_log, "a") as f:
+                                    f.write(f"  Displaying image {timestep_idx}\n")
+                                # Display the static image in the notebook
+                                display(img_copy)
+                            except Exception as e:
+                                with open(debug_log, "a") as f:
+                                    f.write(f"  Error writing image: {e}\n")
+                                raise e
                         else:
                             with open(debug_log, "a") as f:
                                 f.write(f"  Creating 2D frame {timestep_idx}\n")
@@ -5246,9 +5253,12 @@ class InteractiveVisualizationDashboard:
                     f.write(f"Loop finished. frames={len(gif_frames)}, running={self.animation_running}\n")
                     
                 # Create and save GIF if animation completed
-                if self.animation_running and len(gif_frames) > 0:
+                if len(gif_frames) > 0:
                     self.animation_status.value = 'Animation Status: Saving GIF...'
                     
+                    with open(debug_log, "a") as f:
+                        f.write(f"Saving GIF with {len(gif_frames)} frames to {gif_filename}\n")
+                        
                     # Create GIF with proper duration
                     gif_frames[0].save(
                         gif_filename,
@@ -5261,10 +5271,7 @@ class InteractiveVisualizationDashboard:
                     self.animation_status.value = f'Animation Status: Completed - GIF saved: {gif_filename.name}'
                     print(f"🎬 Animation GIF saved: {gif_filename}")
                 else:
-                    if len(gif_frames) == 0:
-                        self.animation_status.value = 'Animation Status: Stopped - No frames captured'
-                    else:
-                        self.animation_status.value = 'Animation Status: Stopped'
+                    self.animation_status.value = 'Animation Status: Stopped - No frames captured'
                         
             except Exception as e:
                 import traceback
