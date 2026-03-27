@@ -5194,57 +5194,56 @@ class InteractiveVisualizationDashboard:
                     current_year = self.start_year + timestep_idx
                     self.animation_status.value = f'Animation Status: Playing (Year {current_year}, Step {timestep_idx+1}/{self.num_tstep}) - Creating GIF...'
                     
-                    # Create frame and capture for GIF
-                    with self.animation_output:
-                        clear_output(wait=True)
+                    if "3D" in anim_mode:
+                        with open(debug_log, "a") as f:
+                            f.write(f"  Creating 3D frame {timestep_idx}\n")
+                        # 3D Mode - create matplotlib figure OUTSIDE widgets.Output()
+                        fig = self._create_3d_animation_frame(case_idx, field_idx, timestep_idx)
                         
-                        if "3D" in anim_mode:
-                            with open(debug_log, "a") as f:
-                                f.write(f"  Creating 3D frame {timestep_idx}\n")
-                            # 3D Mode
-                            fig = self._create_3d_animation_frame(case_idx, field_idx, timestep_idx)
-                            
-                            with open(debug_log, "a") as f:
-                                f.write(f"  Writing image to buffer {timestep_idx}\n")
-                            # Capture frame for GIF
-                            buf = io.BytesIO()
-                            try:
-                                fig.write_image(buf, format='png', scale=1.0)
-                                buf.seek(0)
-                                img = Image.open(buf)
-                                # Make a copy of the image so it doesn't get closed when buf is closed
-                                img_copy = img.copy()
-                                gif_frames.append(img_copy)
-                                
-                                with open(debug_log, "a") as f:
-                                    f.write(f"  Displaying image {timestep_idx}\n")
-                                # Display the static image in the notebook
-                                display(img_copy)
-                            except Exception as e:
-                                with open(debug_log, "a") as f:
-                                    f.write(f"  Error writing image: {e}\n")
-                                raise e
-                        else:
-                            with open(debug_log, "a") as f:
-                                f.write(f"  Creating 2D frame {timestep_idx}\n")
-                            # 2D Mode
-                            fig = self._create_animation_frame_with_capture(case_idx, layer_idx, field_idx, timestep_idx)
-                            
-                            # Display the plot
+                        with open(debug_log, "a") as f:
+                            f.write(f"  Saving to buffer {timestep_idx}\n")
+                        # Capture frame for GIF
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight',
+                                    facecolor=fig.get_facecolor())
+                        buf.seek(0)
+                        gif_frames.append(Image.open(buf))
+                        
+                        with open(debug_log, "a") as f:
+                            f.write(f"  Captured frame {timestep_idx}, total={len(gif_frames)}\n")
+                        # Display in notebook
+                        with self.animation_output:
+                            clear_output(wait=True)
                             display(fig)
-                            
-                            # Capture frame for GIF
-                            buf = io.BytesIO()
-                            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-                            buf.seek(0)
-                            gif_frames.append(Image.open(buf))
-                            
-                            # Close the figure to prevent memory issues
-                            try:
-                                import matplotlib.pyplot as plt
-                                plt.close(fig)
-                            except (AttributeError, RuntimeError):
-                                pass
+                        
+                        try:
+                            import matplotlib.pyplot as plt
+                            plt.close(fig)
+                        except (AttributeError, RuntimeError):
+                            pass
+                    else:
+                        with open(debug_log, "a") as f:
+                            f.write(f"  Creating 2D frame {timestep_idx}\n")
+                        # 2D Mode - create figure OUTSIDE widgets.Output()
+                        fig = self._create_animation_frame_with_capture(case_idx, layer_idx, field_idx, timestep_idx)
+                        
+                        # Capture frame for GIF
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                        buf.seek(0)
+                        gif_frames.append(Image.open(buf))
+                        
+                        # Display in notebook
+                        with self.animation_output:
+                            clear_output(wait=True)
+                            display(fig)
+                        
+                        # Close the figure to prevent memory issues
+                        try:
+                            import matplotlib.pyplot as plt
+                            plt.close(fig)
+                        except (AttributeError, RuntimeError):
+                            pass
                     
                     # Wait for next frame
                     time.sleep(speed)
@@ -5313,139 +5312,118 @@ class InteractiveVisualizationDashboard:
             self.animation_status.value = 'Animation Status: Stopped (Control Changed)'
     
     def _create_3d_animation_frame(self, case_idx, field_idx, timestep_idx):
-        """Create 3D animation frame returning Plotly figure"""
-        import sys
+        """Create 3D animation frame returning a matplotlib figure (not Plotly).
+        
+        Uses matplotlib 3D projection to avoid kaleido/plotly compatibility
+        issues on Windows. Renders side-by-side Predicted vs True as 3D
+        scatter-surface style plots.
+        """
         import numpy as np
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
+        from matplotlib.colors import Normalize
+        import matplotlib.cm as cm
         
-        debug_log = _ROM_DIR / "animation_debug.log"
+        actual_case_idx = self.test_case_indices[case_idx]
+        field_key = self.field_keys[field_idx]
+        field_name = self.field_names[field_idx]
+        current_year = self.start_year + timestep_idx
         
-        try:
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Starting _create_3d_animation_frame\n")
-                
-            # Ensure DigitalTwin is in path
-            dt_path = str(_ROM_DIR.parent)
-            if dt_path not in sys.path:
-                sys.path.append(dt_path)
-                
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Importing DigitalTwin modules\n")
-                
-            from DigitalTwin.visualization.scene_builder import ReservoirSceneBuilder
-            from DigitalTwin.visualization.corner_point_grid import CornerPointGrid
+        # Get data: state_pred is (num_case, num_tstep, n_channels, Nx, Ny, Nz)
+        pred_data = self.state_pred[case_idx, timestep_idx, field_idx].cpu().detach().numpy()
+        true_data = self.state_seq_true_aligned[case_idx, field_idx, timestep_idx].cpu().numpy()
+        
+        # Denormalize
+        pred_denorm = self._denormalize_field_data(pred_data, field_key)
+        true_denorm = self._denormalize_field_data(true_data, field_key)
+        
+        # Get active mask (3D)
+        active_mask_3d = None
+        if self.use_masking_checkbox.value and self.masks_loaded_successfully:
+            if self.mask_type == 'global' and self.active_mask_3d is not None:
+                active_mask_3d = self.active_mask_3d
+            elif self.mask_type == 'case_specific' and self.active_mask_4d is not None:
+                act_idx = self.test_case_indices[case_idx] if case_idx < len(self.test_case_indices) else case_idx
+                if act_idx < self.active_mask_4d.shape[0]:
+                    active_mask_3d = self.active_mask_4d[act_idx]
+        
+        # Apply mask: set inactive cells to NaN
+        if active_mask_3d is not None:
+            pred_denorm = np.where(active_mask_3d, pred_denorm, np.nan)
+            true_denorm = np.where(active_mask_3d, true_denorm, np.nan)
+        
+        # Unified color range
+        all_valid = np.concatenate([
+            pred_denorm[~np.isnan(pred_denorm)],
+            true_denorm[~np.isnan(true_denorm)]
+        ])
+        if len(all_valid) > 0:
+            vmin, vmax = np.percentile(all_valid, [2, 98])
+        else:
+            vmin, vmax = 0, 1
+        
+        # Build coordinate arrays for active voxels
+        Nx, Ny, Nz = pred_denorm.shape
+        ii, jj, kk = np.meshgrid(
+            np.arange(Nx), np.arange(Ny), np.arange(Nz), indexing='ij'
+        )
+        
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        cmap = cm.jet
+        
+        fig = plt.figure(figsize=(16, 7), dpi=100)
+        fig.patch.set_facecolor('#0a0a1a')
+        fig.suptitle(
+            f'{field_name} - Case {actual_case_idx} - Year {current_year}',
+            fontsize=16, fontweight='bold', color='white', y=0.98
+        )
+        
+        for plot_idx, (data, label) in enumerate([(pred_denorm, 'Predicted'), (true_denorm, 'True')]):
+            ax = fig.add_subplot(1, 2, plot_idx + 1, projection='3d')
+            ax.set_facecolor('#0a0a1a')
             
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Loading CPG\n")
-                
-            # Load CPG if available
-            cpg = None
-            cpg_path = _ROM_DIR / "sr3_batch_output" / "corner_point_grid.h5"
-            if cpg_path.exists():
-                import h5py
-                with h5py.File(cpg_path, 'r') as f:
-                    corners = f['corners'][:]
-                cpg = CornerPointGrid(corners, z_exaggeration=30.0, negate_y=True)
-                
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Initializing Scene Builder\n")
-                
-            # Initialize Scene Builder
-            builder = ReservoirSceneBuilder(
-                nx=self.Nx, ny=self.Ny, nz=self.Nz,
-                active_mask=self.mask_data,
-                corner_point_grid=cpg
-            )
+            # Get valid (non-NaN) voxels
+            valid = ~np.isnan(data)
+            x_pts = ii[valid].ravel()
+            y_pts = jj[valid].ravel()
+            z_pts = kk[valid].ravel()
+            c_pts = data[valid].ravel()
             
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Setting channel map\n")
-                
-            # Override channel map to match our data
-            builder.channel_map = {}
-            for i, ch_key in enumerate(self.channel_names):
-                dt_name = {"SG": "gas_saturation", "PRES": "pressure", "PERMI": "permeability", "POROS": "porosity"}.get(ch_key.upper(), ch_key.lower())
-                builder.channel_map[dt_name] = i
-                
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Getting data\n")
-                
-            # Get current selections
-            actual_case_idx = self.test_case_indices[case_idx]
-            field_key = self.field_keys[field_idx]
-            field_name = self.field_names[field_idx]
-            current_year = self.start_year + timestep_idx
+            # Subsample if too many points for performance
+            max_pts = 8000
+            if len(x_pts) > max_pts:
+                idx = np.random.choice(len(x_pts), max_pts, replace=False)
+                idx.sort()
+                x_pts, y_pts, z_pts, c_pts = x_pts[idx], y_pts[idx], z_pts[idx], c_pts[idx]
             
-            # Get data
-            pred_data = self.state_pred[case_idx, timestep_idx].cpu().detach().numpy()
-            true_data = self.state_seq_true_aligned[case_idx, :, timestep_idx].cpu().numpy()
+            colors = cmap(norm(c_pts))
+            ax.scatter(x_pts, y_pts, z_pts, c=colors, s=3, alpha=0.6,
+                       depthshade=True, edgecolors='none')
             
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Denormalizing\n")
-                
-            # Denormalize all channels
-            pred_data_denorm = np.zeros_like(pred_data)
-            true_data_denorm = np.zeros_like(true_data)
-            for i, ch_key in enumerate(self.channel_names):
-                pred_data_denorm[i] = self._denormalize_field_data(pred_data[i], ch_key)
-                true_data_denorm[i] = self._denormalize_field_data(true_data[i], ch_key)
-                
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Building figures\n")
-                
-            # Build individual figures
-            dt_field_map = {"SG": "gas_saturation", "PRES": "pressure", "PERMI": "permeability", "POROS": "porosity"}
-            dt_field_name = dt_field_map.get(field_key, "pressure")
+            ax.set_title(label, fontsize=14, fontweight='bold', color='white', pad=5)
+            ax.set_xlabel('I', color='white', fontsize=9)
+            ax.set_ylabel('J', color='white', fontsize=9)
+            ax.set_zlabel('K', color='white', fontsize=9)
+            ax.tick_params(colors='white', labelsize=7)
+            ax.view_init(elev=25, azim=-60)
+            ax.set_xlim(0, Nx)
+            ax.set_ylim(0, Ny)
+            ax.set_zlim(0, Nz)
+            ax.invert_zaxis()
             
-            fig_pred = builder.build_main_figure(pred_data_denorm, field_name=dt_field_name, camera_preset="cross_section_yz")
-            fig_true = builder.build_main_figure(true_data_denorm, field_name=dt_field_name, camera_preset="cross_section_yz")
-            
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Combining subplots\n")
-                
-            # Combine into subplots
-            fig = make_subplots(
-                rows=1, cols=2,
-                specs=[[{'type': 'scene'}, {'type': 'scene'}]],
-                subplot_titles=(f"Predicted {field_name}", f"True {field_name}")
-            )
-            
-            for trace in fig_pred.data:
-                # Only show colorbar on the second plot to avoid overlap
-                if hasattr(trace, 'showscale'):
-                    trace.showscale = False
-                fig.add_trace(trace, row=1, col=1)
-                
-            for trace in fig_true.data:
-                fig.add_trace(trace, row=1, col=2)
-                
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Updating layout\n")
-                
-            # Update layout
-            scene_layout = fig_pred.layout.scene.to_plotly_json() if hasattr(fig_pred.layout.scene, 'to_plotly_json') else fig_pred.layout.scene
-            fig.update_layout(
-                title=f'Case {actual_case_idx} - Year {current_year}',
-                scene=scene_layout,
-                scene2=scene_layout,
-                paper_bgcolor="rgb(10,10,26)",
-                font=dict(color="white"),
-                height=600,
-                width=1200,
-                margin=dict(l=0, r=0, t=50, b=0)
-            )
-            
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] Done\n")
-                
-            return fig
-            
-        except Exception as e:
-            import traceback
-            err_msg = traceback.format_exc()
-            with open(debug_log, "a") as f:
-                f.write(f"    [3D] EXCEPTION: {err_msg}\n")
-            raise e
+            for pane in [ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane]:
+                pane.set_facecolor((0.04, 0.04, 0.1, 1.0))
+                pane.set_edgecolor('gray')
+        
+        # Colorbar
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=fig.axes, shrink=0.6, aspect=25, pad=0.08)
+        cbar.set_label(field_name, color='white', fontsize=12, fontweight='bold')
+        cbar.ax.tick_params(colors='white', labelsize=9)
+        
+        plt.tight_layout(rect=[0, 0, 0.92, 0.95])
+        return fig
         
     def _create_animation_frame_with_capture(self, case_idx, layer_idx, field_idx, timestep_idx):
         """Create animation frame and return figure for GIF capture - matches spatial tab styling exactly"""
