@@ -555,10 +555,14 @@ class ReservoirEnvironment(object):
         
         # Multi-step action chunking: apply the same action for rom_nsteps ROM transitions
         total_reward = torch.tensor(0.0, device=self.device)
+        self._substep_observations = []
+        self._substep_rewards = []
         for k in range(self.rom_nsteps):
             self.istep += 1
             yobs, step_reward = self._single_rom_step(action_restricted, action_for_reward)
             total_reward = total_reward + step_reward
+            self._substep_observations.append(yobs.clone())
+            self._substep_rewards.append(step_reward.item() if hasattr(step_reward, 'item') else float(step_reward))
             
             if self.istep >= self.nsteps:
                 break

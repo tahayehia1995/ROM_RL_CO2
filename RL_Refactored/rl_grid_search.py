@@ -890,18 +890,28 @@ def run_rl_training(params: Dict, config: Config, z0_options: torch.Tensor,
                 action = orchestrator.select_enhanced_action(agent, state, episode, step, exploration_steps, total_numsteps)
             action = action.to(device)
             next_state, reward, done = env.step(action)
-            obs = getattr(env, 'last_observation', None)
-            orchestrator.record_step_data(step=step, action=action, observation=obs, reward=reward, state=state)
+            substep_obs = getattr(env, '_substep_observations', None)
+            substep_rewards = getattr(env, '_substep_rewards', None)
+            if substep_obs and len(substep_obs) > 1:
+                for si, (sub_obs, sub_r) in enumerate(zip(substep_obs, substep_rewards)):
+                    rom_step = step * rom_nsteps + si
+                    orchestrator.record_step_data(step=rom_step, action=action, observation=sub_obs,
+                                                  reward=torch.tensor(sub_r), state=state)
+                    ep_controls.append(action.detach().cpu().numpy().flatten().tolist())
+                    if sub_obs is not None:
+                        ep_observations.append(sub_obs.detach().cpu().numpy().flatten().tolist())
+            else:
+                obs = getattr(env, 'last_observation', None)
+                orchestrator.record_step_data(step=step, action=action, observation=obs, reward=reward, state=state)
+                ep_controls.append(action.detach().cpu().numpy().flatten().tolist())
+                if obs is not None:
+                    ep_observations.append(obs.detach().cpu().numpy().flatten().tolist())
             total_numsteps += 1
 
             if is_ppo:
                 agent.collect_step(state, action, reward, done)
             else:
                 memory.push(state, action, reward, next_state)
-
-            ep_controls.append(action.detach().cpu().numpy().flatten().tolist())
-            if obs is not None:
-                ep_observations.append(obs.detach().cpu().numpy().flatten().tolist())
 
             state = next_state
             episode_reward += reward.item()

@@ -494,15 +494,28 @@ class RLTrainingDashboard:
                         # Step environment
                         next_state, reward, done = self.environment.step(action)
                         
-                        # Record step data
-                        observation = getattr(self.environment, 'last_observation', None)
-                        self.training_orchestrator.record_step_data(
-                            step=step,
-                            action=action,
-                            observation=observation,
-                            reward=reward,
-                            state=state
-                        )
+                        # Record step data for all ROM sub-steps (for visualization)
+                        substep_obs = getattr(self.environment, '_substep_observations', None)
+                        substep_rewards = getattr(self.environment, '_substep_rewards', None)
+                        if substep_obs and len(substep_obs) > 1:
+                            for si, (sub_obs, sub_r) in enumerate(zip(substep_obs, substep_rewards)):
+                                rom_step = step * rom_nsteps + si
+                                self.training_orchestrator.record_step_data(
+                                    step=rom_step,
+                                    action=action,
+                                    observation=sub_obs,
+                                    reward=torch.tensor(sub_r),
+                                    state=state
+                                )
+                        else:
+                            observation = getattr(self.environment, 'last_observation', None)
+                            self.training_orchestrator.record_step_data(
+                                step=step,
+                                action=action,
+                                observation=observation,
+                                reward=reward,
+                                state=state
+                            )
                         
                         self.total_numsteps += 1
                         step_rewards.append(reward.item())
