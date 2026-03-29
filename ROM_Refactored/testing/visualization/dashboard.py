@@ -4375,6 +4375,19 @@ class InteractiveVisualizationDashboard:
         """Clamp negative values to zero for physical realism (saturations, pressures, rates)."""
         return np.clip(arr, 0.0, None)
 
+    def _get_comparison_spatial_mask(self):
+        """Get 4D spatial mask for Model Comparison plots.
+
+        Returns:
+            np.ndarray of shape (num_case, Nx, Ny, Nz) with True=active, or None if masking disabled.
+        """
+        if not (hasattr(self, 'use_masking_checkbox') and self.use_masking_checkbox.value and
+                hasattr(self, 'masks_loaded_successfully') and self.masks_loaded_successfully):
+            return None
+        return self._get_all_layer_masks_vectorized(
+            np.arange(self.num_case), use_training_data=False
+        )
+
     # ---- main dispatcher -----------------------------------------------
 
     def _update_comparison_plot(self):
@@ -4406,20 +4419,25 @@ class InteractiveVisualizationDashboard:
         fi = self.comp_field_dropdown.value
         fname = self.field_names[fi]
         has_latent = self.state_pred_latent_based is not None and self.spatial_latent_generated
+        spatial_mask = self._get_comparison_spatial_mask()
 
-        def _rmse_per_case_step(pred, true, fi):
+        def _rmse_per_case_step(pred, true, fi, mask=None):
             p = np.clip(pred[:, :, fi, :, :, :], 0.0, None)
             t = true[:, :, fi, :, :, :]
+            if mask is not None:
+                m = mask[:, np.newaxis, :, :, :]
+                p = np.where(m, p, np.nan)
+                t = np.where(m, t, np.nan)
             diff2 = (p - t) ** 2
-            return np.sqrt(diff2.reshape(diff2.shape[0], diff2.shape[1], -1).mean(axis=2))
+            return np.sqrt(np.nanmean(diff2.reshape(diff2.shape[0], diff2.shape[1], -1), axis=2))
 
         pred_s, true_s = self._get_state_np('state')
-        rmse_s = _rmse_per_case_step(pred_s, true_s, fi)
+        rmse_s = _rmse_per_case_step(pred_s, true_s, fi, spatial_mask)
 
         rmse_l = None
         if has_latent:
             pred_l, true_l = self._get_state_np('latent')
-            rmse_l = _rmse_per_case_step(pred_l, true_l, fi)
+            rmse_l = _rmse_per_case_step(pred_l, true_l, fi, spatial_mask)
 
         ncols = 2 if has_latent else 1
         fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 5), squeeze=False)
@@ -4690,22 +4708,29 @@ class InteractiveVisualizationDashboard:
         fi = self.comp_field_dropdown.value
         fname = self.field_names[fi]
         has_latent = self.state_pred_latent_based is not None and self.spatial_latent_generated
+        spatial_mask = self._get_comparison_spatial_mask()
 
-        def _r2_per_case_step(pred, true, fi):
-            p = np.clip(pred[:, :, fi, :, :, :], 0.0, None).reshape(pred.shape[0], pred.shape[1], -1)
-            t = true[:, :, fi, :, :, :].reshape(true.shape[0], true.shape[1], -1)
-            ss_res = ((t - p) ** 2).sum(axis=2)
-            ss_tot = ((t - t.mean(axis=2, keepdims=True)) ** 2).sum(axis=2)
+        def _r2_per_case_step(pred, true, fi, mask=None):
+            p = np.clip(pred[:, :, fi, :, :, :], 0.0, None)
+            t = true[:, :, fi, :, :, :]
+            if mask is not None:
+                m = mask[:, np.newaxis, :, :, :]
+                p = np.where(m, p, np.nan)
+                t = np.where(m, t, np.nan)
+            p = p.reshape(pred.shape[0], pred.shape[1], -1)
+            t = t.reshape(true.shape[0], true.shape[1], -1)
+            ss_res = np.nansum((t - p) ** 2, axis=2)
+            ss_tot = np.nansum((t - np.nanmean(t, axis=2, keepdims=True)) ** 2, axis=2)
             r2 = np.where(ss_tot > 0, 1.0 - ss_res / ss_tot, 0.0)
             return r2
 
         pred_s, true_s = self._get_state_np('state')
-        r2_s = np.clip(_r2_per_case_step(pred_s, true_s, fi), 0.0, 1.0)
+        r2_s = np.clip(_r2_per_case_step(pred_s, true_s, fi, spatial_mask), 0.0, 1.0)
 
         r2_l = None
         if has_latent:
             pred_l, true_l = self._get_state_np('latent')
-            r2_l = np.clip(_r2_per_case_step(pred_l, true_l, fi), 0.0, 1.0)
+            r2_l = np.clip(_r2_per_case_step(pred_l, true_l, fi, spatial_mask), 0.0, 1.0)
 
         T = r2_s.shape[1]
         timesteps = np.arange(1, T + 1)
@@ -4751,26 +4776,35 @@ class InteractiveVisualizationDashboard:
         fi = self.comp_field_dropdown.value
         fname = self.field_names[fi]
         has_latent = self.state_pred_latent_based is not None and self.spatial_latent_generated
+        spatial_mask = self._get_comparison_spatial_mask()
 
-        def _rmse_per_case_step(pred, true, fi):
+        def _rmse_per_case_step(pred, true, fi, mask=None):
             p = np.clip(pred[:, :, fi, :, :, :], 0.0, None)
             t = true[:, :, fi, :, :, :]
+            if mask is not None:
+                m = mask[:, np.newaxis, :, :, :]
+                p = np.where(m, p, np.nan)
+                t = np.where(m, t, np.nan)
             diff2 = (p - t) ** 2
-            return np.sqrt(diff2.reshape(diff2.shape[0], diff2.shape[1], -1).mean(axis=2))
+            return np.sqrt(np.nanmean(diff2.reshape(diff2.shape[0], diff2.shape[1], -1), axis=2))
+
+        def _data_range_masked(true, fi, mask=None):
+            t = true[:, :, fi, :, :, :]
+            if mask is not None:
+                t = np.where(mask[:, np.newaxis, :, :, :], t, np.nan)
+            t_flat = t.reshape(t.shape[0], t.shape[1], -1)
+            return (np.nanmax(t_flat, axis=(1, 2)) - np.nanmin(t_flat, axis=(1, 2))).clip(min=1e-10)
 
         pred_s, true_s = self._get_state_np('state')
-        rmse_s = _rmse_per_case_step(pred_s, true_s, fi)
-
-        true_field_s = true_s[:, :, fi, :, :, :].reshape(true_s.shape[0], true_s.shape[1], -1)
-        data_range_s = (true_field_s.max(axis=(1, 2)) - true_field_s.min(axis=(1, 2))).clip(min=1e-10)
+        rmse_s = _rmse_per_case_step(pred_s, true_s, fi, spatial_mask)
+        data_range_s = _data_range_masked(true_s, fi, spatial_mask)
         nrmse_s = rmse_s / data_range_s[:, None]
 
         nrmse_l = None
         if has_latent:
             pred_l, true_l = self._get_state_np('latent')
-            rmse_l = _rmse_per_case_step(pred_l, true_l, fi)
-            true_field_l = true_l[:, :, fi, :, :, :].reshape(true_l.shape[0], true_l.shape[1], -1)
-            data_range_l = (true_field_l.max(axis=(1, 2)) - true_field_l.min(axis=(1, 2))).clip(min=1e-10)
+            rmse_l = _rmse_per_case_step(pred_l, true_l, fi, spatial_mask)
+            data_range_l = _data_range_masked(true_l, fi, spatial_mask)
             nrmse_l = rmse_l / data_range_l[:, None]
 
         T = nrmse_s.shape[1]
@@ -4817,20 +4851,25 @@ class InteractiveVisualizationDashboard:
         fname = self.field_names[fi]
         has_latent = self.state_pred_latent_based is not None and self.spatial_latent_generated
         selected_case = self.comp_case_dropdown.value  # -1 = all cases, else index
+        spatial_mask = self._get_comparison_spatial_mask()
 
-        def _rmse_per_case_step(pred, true, fi):
+        def _rmse_per_case_step(pred, true, fi, mask=None):
             p = np.clip(pred[:, :, fi, :, :, :], 0.0, None)
             t = true[:, :, fi, :, :, :]
+            if mask is not None:
+                m = mask[:, np.newaxis, :, :, :]
+                p = np.where(m, p, np.nan)
+                t = np.where(m, t, np.nan)
             diff2 = (p - t) ** 2
-            return np.sqrt(diff2.reshape(diff2.shape[0], diff2.shape[1], -1).mean(axis=2))
+            return np.sqrt(np.nanmean(diff2.reshape(diff2.shape[0], diff2.shape[1], -1), axis=2))
 
         pred_s, true_s = self._get_state_np('state')
-        rmse_s = _rmse_per_case_step(pred_s, true_s, fi)
+        rmse_s = _rmse_per_case_step(pred_s, true_s, fi, spatial_mask)
 
         rmse_l = None
         if has_latent:
             pred_l, true_l = self._get_state_np('latent')
-            rmse_l = _rmse_per_case_step(pred_l, true_l, fi)
+            rmse_l = _rmse_per_case_step(pred_l, true_l, fi, spatial_mask)
 
         if selected_case == -1:
             self._plot_error_heatmap_all(rmse_s, rmse_l, has_latent, fname)

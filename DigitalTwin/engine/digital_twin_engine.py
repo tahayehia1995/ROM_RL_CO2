@@ -137,6 +137,7 @@ class DigitalTwinEngine:
         # RL agent (lazy)
         self.rl_agent = None
         self._rl_agent_loaded = False
+        self._rl_algorithm_type: Optional[str] = None
 
         # Scan and auto-load first model
         models = self.scan_models()
@@ -715,31 +716,90 @@ class DigitalTwinEngine:
     # ==================================================================
     # RL Agent
     # ==================================================================
-    def load_rl_agent(self, checkpoint_path: str = None) -> bool:
+    _AGENT_MAP = {
+        'SAC':  ('RL_Refactored.agent.sac_agent',  'SAC'),
+        'DDPG': ('RL_Refactored.agent.ddpg_agent', 'DDPG'),
+        'TD3':  ('RL_Refactored.agent.td3_agent',  'TD3'),
+        'PPO':  ('RL_Refactored.agent.ppo_agent',  'PPO'),
+    }
+
+    def scan_rl_policies(self) -> list:
+        """Scan RL_Refactored/checkpoints/ for saved agent checkpoints.
+
+        Returns a list of dicts with keys: path, label, algorithm, filename.
+        """
+        ckpt_dir = _RL_DIR / "checkpoints"
+        policies: list = []
+        if not ckpt_dir.exists():
+            return policies
+
+        for fpath in sorted(ckpt_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if fpath.is_dir() or fpath.suffix == '.pkl':
+                continue
+            algo = self._detect_algorithm(fpath)
+            if algo is None:
+                continue
+            label = f"{algo} | {fpath.name}"
+            policies.append({
+                "path": str(fpath),
+                "label": label,
+                "algorithm": algo,
+                "filename": fpath.name,
+            })
+        return policies
+
+    @staticmethod
+    def _detect_algorithm(fpath: Path) -> Optional[str]:
+        """Detect algorithm type from checkpoint file."""
+        fname_lower = fpath.name.lower()
+        for prefix, algo in [('sac_', 'SAC'), ('ddpg_', 'DDPG'), ('td3_', 'TD3'), ('ppo_', 'PPO')]:
+            if fname_lower.startswith(prefix):
+                return algo
+
         try:
-            from RL_Refactored.agent.sac_agent import SAC
-            latent_dim = self.rom_config.model["latent_dim"]
-            self.rl_agent = SAC(latent_dim, self.u_dim, self.rl_config)
-            self._rl_agent_loaded = True
-            ckpt = checkpoint_path or self._find_rl_checkpoint()
-            if ckpt and Path(str(ckpt)).exists():
-                self.rl_agent.load_checkpoint(str(ckpt), evaluate=True)
-            return True
-        except Exception as exc:
-            print(f"[DT-Engine] RL agent failed: {exc}")
-            self.rl_agent = None
-            self._rl_agent_loaded = False
+            ckpt = torch.load(str(fpath), map_location='cpu', weights_only=False)
+            arch = ckpt.get('architecture', {})
+            algo_str = arch.get('algorithm_type', '').upper()
+            if algo_str in ('SAC', 'DDPG', 'TD3', 'PPO'):
+                return algo_str
+            if 'policy_state_dict' in ckpt:
+                if 'critic_target_state_dict' in ckpt and 'policy_target_state_dict' not in ckpt:
+                    return 'SAC'
+                if 'policy_target_state_dict' in ckpt:
+                    return 'DDPG'
+                return 'SAC'
+        except Exception:
+            pass
+        return None
+
+    def load_rl_agent(self, algorithm_type: str = 'SAC',
+                      checkpoint_path: str = None) -> bool:
+        """Load an RL agent of the given algorithm type from a checkpoint."""
+        algo_key = algorithm_type.upper()
+        if algo_key not in self._AGENT_MAP:
+            print(f"[DT-Engine] Unknown RL algorithm: {algorithm_type}")
             return False
 
-    def _find_rl_checkpoint(self) -> Optional[Path]:
-        for d in [_RL_DIR / "saved_models", _RL_DIR, _PROJECT_ROOT / "saved_models"]:
-            if not d.exists():
-                continue
-            for pat in ("*sac*.pth", "*SAC*.pth", "*checkpoint*.pth"):
-                hits = sorted(d.glob(pat), key=lambda p: p.stat().st_mtime, reverse=True)
-                if hits:
-                    return hits[0]
-        return None
+        mod_path, cls_name = self._AGENT_MAP[algo_key]
+        try:
+            import importlib
+            mod = importlib.import_module(mod_path)
+            AgentClass = getattr(mod, cls_name)
+            latent_dim = self.rom_config.model["latent_dim"]
+            self.rl_agent = AgentClass(latent_dim, self.u_dim, self.rl_config)
+            self._rl_agent_loaded = True
+            self._rl_algorithm_type = algo_key
+            if checkpoint_path and Path(checkpoint_path).exists():
+                self.rl_agent.load_checkpoint(str(checkpoint_path), evaluate=True)
+            print(f"[DT-Engine] {algo_key} agent loaded from {checkpoint_path}")
+            return True
+        except Exception as exc:
+            print(f"[DT-Engine] RL agent failed ({algo_key}): {exc}")
+            import traceback; traceback.print_exc()
+            self.rl_agent = None
+            self._rl_agent_loaded = False
+            self._rl_algorithm_type = None
+            return False
 
     def get_rl_action(self) -> Optional[np.ndarray]:
         if self.rl_agent is None or self.current_latent is None:

@@ -112,9 +112,26 @@ def build_control_panel() -> dbc.Card:
 
             dbc.Checklist(
                 id="toggle-rl",
-                options=[{"label": "  RL Agent (SAC auto-pilot)", "value": "rl_on"}],
+                options=[{"label": "  RL Auto-pilot", "value": "rl_on"}],
                 value=[], switch=True, style={"color": "#8899aa"},
             ),
+
+            html.Div(id="rl-policy-section", children=[
+                dcc.Dropdown(
+                    id="dd-rl-policy",
+                    options=[],
+                    value=None,
+                    placeholder="Select RL policy...",
+                    clearable=False,
+                    style={"background": "#1a1a40", "color": "#e0e0e0",
+                           "marginTop": "6px", "marginBottom": "4px"},
+                ),
+                html.Div(id="rl-policy-status",
+                         style={"fontSize": "0.7rem", "color": "#667788",
+                                "marginBottom": "4px"}),
+            ], style={"display": "none"}),
+
+            dcc.Store(id="store-rl-policies", data=[]),
 
             html.Hr(style={"borderColor": "#0f3460"}),
 

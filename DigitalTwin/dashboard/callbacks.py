@@ -11,7 +11,7 @@ from typing import List
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import html, dcc, Input, Output, State, callback_context
+from dash import html, dcc, Input, Output, State, callback_context, no_update
 from dash.exceptions import PreventUpdate
 
 from DigitalTwin.visualization import ReservoirSceneBuilder
@@ -108,6 +108,61 @@ def register_callbacks(app, engine):
         return (not is_open) if n else is_open
 
     # ------------------------------------------------------------------
+    # RL POLICY: populate dropdown and load agent
+    # ------------------------------------------------------------------
+    @app.callback(
+        Output("dd-rl-policy", "options"),
+        Output("dd-rl-policy", "value"),
+        Output("store-rl-policies", "data"),
+        Output("rl-policy-section", "style"),
+        Output("rl-policy-status", "children"),
+        Input("toggle-rl", "value"),
+        prevent_initial_call=True,
+    )
+    def _populate_rl_policies(rl_toggle):
+        rl_on = isinstance(rl_toggle, list) and "rl_on" in rl_toggle
+        if not rl_on:
+            return [], None, [], {"display": "none"}, ""
+
+        policies = engine.scan_rl_policies()
+        if not policies:
+            return ([], None, [],
+                    {"display": "block"},
+                    "No RL checkpoints found in RL_Refactored/checkpoints/")
+
+        options = [{"label": p["label"], "value": str(idx)}
+                   for idx, p in enumerate(policies)]
+        return (options, "0", policies,
+                {"display": "block"},
+                f"Found {len(policies)} policy checkpoint(s)")
+
+    @app.callback(
+        Output("rl-policy-status", "children", allow_duplicate=True),
+        Input("dd-rl-policy", "value"),
+        State("store-rl-policies", "data"),
+        prevent_initial_call=True,
+    )
+    def _load_rl_policy(selected_idx, policies_data):
+        if selected_idx is None or not policies_data:
+            raise PreventUpdate
+        try:
+            idx = int(selected_idx)
+        except (TypeError, ValueError):
+            raise PreventUpdate
+        if idx < 0 or idx >= len(policies_data):
+            raise PreventUpdate
+
+        policy = policies_data[idx]
+        algo = policy["algorithm"]
+        ckpt_path = policy["path"]
+
+        ok = engine.load_rl_agent(algorithm_type=algo, checkpoint_path=ckpt_path)
+        if ok:
+            return f"✓ {algo} loaded: {policy['filename']}"
+        else:
+            return f"✗ Failed to load {algo} from {policy['filename']}"
+
+    # ------------------------------------------------------------------
     # MAIN CALLBACK: STEP / RESET / AUTO-PLAY
     # ------------------------------------------------------------------
     @app.callback(
@@ -128,6 +183,13 @@ def register_callbacks(app, engine):
         Output("step-display", "children"),
         Output("store-state", "data"),
         Output("status-bar", "children"),
+        # Slider value outputs (synced when RL drives)
+        Output("slider-P1-bhp", "value"),
+        Output("slider-P2-bhp", "value"),
+        Output("slider-P3-bhp", "value"),
+        Output("slider-I1-gas", "value"),
+        Output("slider-I2-gas", "value"),
+        Output("slider-I4-gas", "value"),
         # Inputs -- actions
         Input("btn-step", "n_clicks"),
         Input("btn-reset", "n_clicks"),
@@ -185,6 +247,7 @@ def register_callbacks(app, engine):
         mode_label = "latent" if engine.prediction_mode == "latent" else "state"
         case_val = int(case_idx) if case_idx is not None else 0
         status_msg = _status_html(f"{engine._loaded_model_label} [{mode_label}] Case {case_val}", "#53d8fb")
+        slider_vals = (no_update,) * 6
 
         if triggered == "slider-case":
             engine.set_case(case_val)
@@ -202,13 +265,20 @@ def register_callbacks(app, engine):
         elif triggered in ("btn-step", "auto-interval"):
             if rl_active:
                 if not engine._rl_agent_loaded:
-                    engine.load_rl_agent()
-                rl_action = engine.get_rl_action()
-                if rl_action is not None:
-                    controls = rl_action
-                    status_msg = _status_html(f"RL driving [{mode_label}]", "#53d8fb")
-                else:
+                    status_msg = _status_html(
+                        "Select an RL policy from the dropdown first", "#e94560")
                     controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
+                else:
+                    rl_action = engine.get_rl_action()
+                    if rl_action is not None:
+                        controls = rl_action
+                        algo_tag = engine._rl_algorithm_type or "RL"
+                        status_msg = _status_html(
+                            f"{algo_tag} driving [{mode_label}] Step {engine.step_index}",
+                            "#53d8fb")
+                        slider_vals = tuple(float(controls[j]) for j in range(min(6, len(controls))))
+                    else:
+                        controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
             else:
                 controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
 
@@ -259,6 +329,7 @@ def register_callbacks(app, engine):
             *bhp_figs, *gas_figs, *wat_figs, fig_npv,
             f"Step: {engine.step_index} / {engine.max_steps}",
             {"step": engine.step_index}, status_msg,
+            *slider_vals,
         )
 
     # ---- Auto-play toggle ----
