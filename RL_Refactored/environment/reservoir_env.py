@@ -47,6 +47,7 @@ class ReservoirEnvironment(object):
         
         # Episode configuration
         self.nsteps = config.rl_model['environment']['max_episode_steps']
+        self.rom_nsteps = config.rl_model['environment'].get('rom_nsteps', 1)
         self.istep = 0
         self._sampling_count = 0
         self._last_case_idx = 0
@@ -65,6 +66,8 @@ class ReservoirEnvironment(object):
             prediction_mode = 'state_based'
         self.prediction_mode = prediction_mode
         print(f"🎯 Environment using {self.prediction_mode} prediction mode")
+        if self.rom_nsteps > 1:
+            print(f"🔄 Multi-step action chunking: each RL step = {self.rom_nsteps} ROM transitions")
         
         # Noise configuration with safety defaults
         if 'environment' in config.rl_model and 'noise' in config.rl_model['environment']:
@@ -489,38 +492,13 @@ class ReservoirEnvironment(object):
         # NO FALLBACKS - if we reach here, something is wrong with parameter loading
         raise ValueError(f"❌ Missing normalization parameters for observation {obs_idx}! Available params: {list(self.norm_params.keys())}")
     
-    def step(self, action):
-        self.istep += 1
+    def _single_rom_step(self, action_rom, action_for_reward):
+        """Execute a single ROM transition and return (yobs_physical, step_reward).
         
-        # Handle dashboard-constrained actions from policy
-        # Policy outputs [0,1] where [0,1] corresponds to dashboard ranges directly
-        # Convert these to physical units using dashboard ranges, then normalize for ROM
-        action_restricted = self._map_dashboard_action_to_rom_input(action)
-        
-        if self.istep <= 3:
-            # Show normalized actions for ROM input (all individual values)
-            if action_restricted.shape[0] > 0:
-                # Action order: [Producer_BHP(0-2), Gas_Injection(3-5)]
-                producer_bhp_norm = action_restricted[0, 0:self.num_prod].detach().cpu().numpy()  # Producer BHP normalized
-                gas_injection_norm = action_restricted[0, self.num_prod:self.num_prod+self.num_inj].detach().cpu().numpy()  # Gas Injection normalized
-                
-                # Format and print normalized actions
-                bhp_norm_str = ", ".join([f"{val:.3f}" for val in producer_bhp_norm])
-                gas_norm_str = ", ".join([f"{val:.3f}" for val in gas_injection_norm])
-                
-                print(f"   🔧 Step {self.istep}: Actions normalized for ROM input → Producer_BHP=[{bhp_norm_str}], Gas_Injection=[{gas_norm_str}]")
-            
-        # Store original action for reward calculation (which needs physical units)
-        action_for_reward = action.clone()
-        # Use restricted action for ROM prediction
-        action = action_restricted
-        
-        # 🔬 Dual prediction mode implementation
+        Advances self.state / self.current_spatial_state by one ROM timestep.
+        """
         try:
             if self.prediction_mode == 'state_based':
-                # 🎓 EXACT TRAINING DASHBOARD METHOD: Use rom.predict() with spatial states
-                # This is the SAME method used in the training dashboard that shows excellent results
-                
                 if not hasattr(self, 'current_spatial_state'):
                     if hasattr(self.rom.model, 'encode_initial'):
                         raise RuntimeError(
@@ -529,24 +507,13 @@ class ReservoirEnvironment(object):
                         )
                     self.current_spatial_state = self.rom.model.decoder(self.state)
                 
-                # Create dummy observation (training dashboard uses ground truth, we'll use zeros)
-                # Structure: [Injector_BHP(3), Gas_production(3), Water_production(3)] = 9 observations
                 dummy_obs = torch.zeros(self.current_spatial_state.shape[0], 9).to(self.device)
-                
-                # 🎓 EXACT TRAINING DASHBOARD INPUTS: (spatial_state, controls, observations, dt)
-                inputs = (self.current_spatial_state, action, dummy_obs, self.dt)
-                
-                
+                inputs = (self.current_spatial_state, action_rom, dummy_obs, self.dt)
                 next_spatial_state, yobs = self.rom.predict(inputs)
-                
-                # Store raw output for next iteration (no clamp — matches ROM
-                # evaluation dashboard which feeds unclamped predictions back)
                 self.current_spatial_state = next_spatial_state
                 
-                # Encode next spatial state to latent (for RL state representation)
                 with torch.no_grad():
                     if hasattr(self.rom.model, 'encode_initial'):
-                        # GNN / Multimodal: unified encode_initial
                         self.state = self.rom.model.encode_initial(next_spatial_state)
                     else:
                         encoder_output = self.rom.model.encoder(next_spatial_state)
@@ -554,18 +521,9 @@ class ReservoirEnvironment(object):
                             self.state = encoder_output[0]
                         else:
                             self.state = encoder_output
-                
-                # Debug logging for first few steps
-                if self.istep <= 3:
-                    print(f"   🎓 Step {self.istep}: Using EXACT training dashboard method (rom.predict)")
-                
             else:
-                # Latent-based prediction mode: Pure latent evolution
-                self.state, yobs = self.rom.predict_latent(self.state, self.dt, action)
-
-
+                self.state, yobs = self.rom.predict_latent(self.state, self.dt, action_rom)
             
-            # Check for NaN outputs
             if torch.isnan(self.state).any() or torch.isnan(yobs).any():
                 print("⚠️ ROM predicted NaN values")
                 
@@ -573,95 +531,56 @@ class ReservoirEnvironment(object):
             print(f"❌ ROM prediction failed: {e}")
             raise
 
-        # 📊 Apply ROM-based observation denormalization: [Injector_BHP(3), Producer_Gas(3), Producer_Water(3)]
-        # 🎯 NO CONSTRAINTS - Show RAW ROM predictions to understand the actual output
-        
-        # Always apply ROM normalization parameters - NO FALLBACKS
-        # 📊 Show RAW ROM outputs without any modification
-        yobs_original = yobs.clone()
-        
-        # Print normalized observations from ROM (before denormalization)
-        if self.istep <= 3:
-            # Observation order: [Injector_BHP(0-2), Gas_Production(3-5), Water_Production(6-8)]
-            if yobs_original.shape[0] > 0:
-                # Extract normalized observation values
-                injector_bhp_norm = yobs_original[0, 0:self.num_inj].detach().cpu().numpy()  # Injector BHP normalized
-                gas_production_norm = yobs_original[0, self.num_inj:self.num_inj+self.num_prod].detach().cpu().numpy()  # Gas Production normalized
-                water_production_norm = yobs_original[0, self.num_inj+self.num_prod:self.num_inj+self.num_prod*2].detach().cpu().numpy()  # Water Production normalized
-                
-                # Format and print normalized observations
-                bhp_norm_str = ", ".join([f"{val:.3f}" for val in injector_bhp_norm])
-                gas_norm_str = ", ".join([f"{val:.3f}" for val in gas_production_norm])
-                water_norm_str = ", ".join([f"{val:.3f}" for val in water_production_norm])
-                
-                print(f"   🔧 Step {self.istep}: Observations normalized from ROM output → Injector_BHP=[{bhp_norm_str}], Gas_Production=[{gas_norm_str}], Water_Production=[{water_norm_str}]")
-        
-        # Clamp normalized observations to valid [0,1] range before denormalization
-        # Prevents exponential explosion through log denormalization when latent drift
-        # produces out-of-range values. In state-based mode this rarely activates since
-        # spatial clamping already keeps observations bounded.
-        yobs_original = torch.clamp(yobs_original, min=0.0, max=1.0)
-        
-        # Apply ROM-based denormalization directly
-        yobs_denorm = self._denormalize_observations_rom(yobs_original)
-        
-        # Ensure non-negative observations after denormalization
+        yobs_clamped = torch.clamp(yobs.clone(), min=0.0, max=1.0)
+        yobs_denorm = self._denormalize_observations_rom(yobs_clamped)
         yobs_denorm = torch.clamp(yobs_denorm, min=0.0)
-        
-        yobs = yobs_denorm
 
-        # 🔬 Store last observation for scientific visualization
+        action_physical = self._convert_dashboard_action_to_physical(action_for_reward)
+        step_reward = reward_fun(yobs_denorm, action_physical, self.num_prod, self.num_inj, self.config)
+        
+        return yobs_denorm, step_reward
+    
+    def step(self, action):
+        # Handle dashboard-constrained actions from policy
+        action_restricted = self._map_dashboard_action_to_rom_input(action)
+        action_for_reward = action.clone()
+        
+        if self.istep < 3:
+            if action_restricted.shape[0] > 0:
+                producer_bhp_norm = action_restricted[0, 0:self.num_prod].detach().cpu().numpy()
+                gas_injection_norm = action_restricted[0, self.num_prod:self.num_prod+self.num_inj].detach().cpu().numpy()
+                bhp_norm_str = ", ".join([f"{val:.3f}" for val in producer_bhp_norm])
+                gas_norm_str = ", ".join([f"{val:.3f}" for val in gas_injection_norm])
+                print(f"   🔧 RL-Step {self.istep+1}: Actions normalized for ROM → Producer_BHP=[{bhp_norm_str}], Gas_Injection=[{gas_norm_str}]")
+        
+        # Multi-step action chunking: apply the same action for rom_nsteps ROM transitions
+        total_reward = torch.tensor(0.0, device=self.device)
+        for k in range(self.rom_nsteps):
+            self.istep += 1
+            yobs, step_reward = self._single_rom_step(action_restricted, action_for_reward)
+            total_reward = total_reward + step_reward
+            
+            if self.istep >= self.nsteps:
+                break
+        
         self.last_observation = yobs.clone()
         
-        # 📊 Print predicted observations in physical units (similar to actions)
         if self.istep <= 3:
-            # Observation order: [Injector_BHP(0-2), Gas_Production(3-5), Water_Production(6-8)]
             if yobs.shape[0] > 0:
-                # Extract observation values
-                injector_bhp = yobs[0, 0:self.num_inj].detach().cpu().numpy()  # Injector BHP (psi)
-                gas_production = yobs[0, self.num_inj:self.num_inj+self.num_prod].detach().cpu().numpy()  # Gas Production (ft³/day)
-                water_production = yobs[0, self.num_inj+self.num_prod:self.num_inj+self.num_prod*2].detach().cpu().numpy()  # Water Production (ft³/day)
-                
-                # Format and print observations
+                injector_bhp = yobs[0, 0:self.num_inj].detach().cpu().numpy()
+                gas_production = yobs[0, self.num_inj:self.num_inj+self.num_prod].detach().cpu().numpy()
+                water_production = yobs[0, self.num_inj+self.num_prod:self.num_inj+self.num_prod*2].detach().cpu().numpy()
                 bhp_str = ", ".join([f"{val:.1f}" for val in injector_bhp])
                 gas_str = ", ".join([f"{val:.0f}" for val in gas_production])
                 water_str = ", ".join([f"{val:.0f}" for val in water_production])
-                
-                print(f"   📊 Step {self.istep}: Predicted observations → Injector_BHP=[{bhp_str}] psi, Gas_Production=[{gas_str}] ft³/day, Water_Production=[{water_str}] ft³/day")
-
-        # Calculate reward with physical actions (normalization parameters always available)
-        try:
-            # Convert actions to physical units for reward calculation
-            # action_for_reward now contains [0,1] actions corresponding to dashboard ranges
-            # Convert to physical units using dashboard ranges
-            action_physical = self._convert_dashboard_action_to_physical(action_for_reward)
-            
-            # Print physical actions and observations for first few steps
-            if self.istep <= 3:
-                # Action order: [Producer_BHP(0-2), Gas_Injection(3-5)]
-                producer_bhp = action_physical[0, 0:self.num_prod].detach().cpu().numpy()  # Producer BHP (psi)
-                gas_injection = action_physical[0, self.num_prod:self.num_prod+self.num_inj].detach().cpu().numpy()  # Gas Injection (ft³/day)
-                
-                # Format and print actions
-                bhp_str = ", ".join([f"{val:.1f}" for val in producer_bhp])
-                gas_str = ", ".join([f"{val:.0f}" for val in gas_injection])
-                
-                print(f"   🎯 Step {self.istep}: Policy actions → Producer_BHP=[{bhp_str}] psi, Gas_Injection=[{gas_str}] ft³/day")
-            
-            # Use physical actions for reward calculation
-            reward = reward_fun(yobs, action_physical, self.num_prod, self.num_inj, self.config)
-            
-        except Exception as e:
-            print(f"❌ Reward calculation failed: {e}")
-            raise
+                print(f"   📊 ROM-Step {self.istep}: Observations → Injector_BHP=[{bhp_str}] psi, Gas=[{gas_str}] ft³/day, Water=[{water_str}] ft³/day")
         
-        done = self.istep == self.nsteps
+        done = self.istep >= self.nsteps
         
-        # Minimal logging only on completion or errors
         if done:
-            print(f"Episode completed: {self.istep} steps, final reward: {reward.item():.2f}")
+            print(f"Episode completed: {self.istep} ROM steps ({self.istep // self.rom_nsteps} RL decisions), final reward: {total_reward.item():.2f}")
                 
-        return self.state, reward, done
+        return self.state, total_reward, done
     
     def reset(self, z0_options=None):
         """

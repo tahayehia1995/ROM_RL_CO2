@@ -211,7 +211,8 @@ class RLTrainingDashboard:
         Returns:
             mean_eval_npv: Mean NPV across evaluated cases
         """
-        max_steps = self.config.rl_model['training']['max_steps_per_episode']
+        rom_nsteps = self.config.rl_model['environment'].get('rom_nsteps', 1)
+        max_steps = self.config.rl_model['training']['max_steps_per_episode'] // rom_nsteps
         total_available = z0_options.shape[0]
         num_cases = min(num_cases, total_available)
         
@@ -417,7 +418,10 @@ class RLTrainingDashboard:
             # Training parameters
             training_config = self.config.rl_model['training']
             max_episodes = training_config['max_episodes']
-            max_steps = training_config['max_steps_per_episode']
+            rom_nsteps = self.config.rl_model['environment'].get('rom_nsteps', 1)
+            max_steps = training_config['max_steps_per_episode'] // rom_nsteps
+            if rom_nsteps > 1:
+                print(f"🔄 Multi-step chunking active: {training_config['max_steps_per_episode']} ROM steps / {rom_nsteps} = {max_steps} RL decisions per episode")
             batch_size = self.config.rl_model['replay_memory']['batch_size']
             updates_per_step = training_config['updates_per_step']
             save_interval = 100

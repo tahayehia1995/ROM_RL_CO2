@@ -2964,6 +2964,10 @@ Where:
                     rom_config.training['nsteps'] = nsteps
                     print(f"      ✅ Updated nsteps: {rom_config.training.get('nsteps')} → {nsteps}")
                     config_updated = True
+                # Propagate to RL environment for multi-step action chunking
+                if nsteps:
+                    config.rl_model['environment']['rom_nsteps'] = int(nsteps)
+                    print(f"      ✅ RL action chunking set to rom_nsteps={nsteps} (each RL step = {nsteps} ROM transitions)")
             
             # Update channels if found — also propagate to input_shape, encoder, decoder
             if 'channels' in model_info:

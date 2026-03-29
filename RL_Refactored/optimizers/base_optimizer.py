@@ -137,6 +137,7 @@ class BaseOptimizer(ABC):
         self.custom_initial_guess = None  # Set externally for hybrid warm-start
         self.spatial_states = spatial_states  # For multimodal models
         self.prediction_mode = 'latent' if prediction_mode == 'latent_based' else 'state_based'
+        self.rom_nsteps = config.rl_model['environment'].get('rom_nsteps', 1) if hasattr(config, 'rl_model') else 1
         
         # Extract well configuration
         self.num_prod = config.data.get('num_prod', 3)
@@ -497,74 +498,55 @@ class BaseOptimizer(ABC):
             # Convert physical controls to NORMALIZED format for ROM input
             control_normalized = self._prepare_control_for_rom(control_physical)
             
-            # Create dummy observation (same as RL environment)
-            # Structure: [Injector_BHP(3), Gas_production(3), Water_production(3)] = 9 observations
-            dummy_obs = torch.zeros(current_spatial.shape[0], 9).to(self.device)
-            
-            # ROM prediction using EXACT same method as RL environment (state_based)
-            # Input format: (spatial_state, controls, observations, dt)
-            with torch.no_grad():
-                inputs = (current_spatial, control_normalized, dummy_obs, self.dt)
-                next_spatial, yobs_normalized = self.rom.predict(inputs)
+            # Multi-step action chunking: repeat the same control for rom_nsteps ROM transitions
+            chunk_reward = 0.0
+            for k in range(self.rom_nsteps):
+                dummy_obs = torch.zeros(current_spatial.shape[0], 9).to(self.device)
                 
-                # Clamp negative spatial values to zero
-                next_spatial = torch.clamp(next_spatial, min=0.0)
-                
-                # Encode next spatial to latent for state tracking
-                if hasattr(self.rom.model, 'encode_initial'):
-                    # GNN / Multimodal: unified encode_initial
-                    next_latent = self.rom.model.encode_initial(next_spatial)
-                else:
-                    encoder_output = self.rom.model.encoder(next_spatial)
-                    if isinstance(encoder_output, tuple):
-                        next_latent = encoder_output[0]
+                with torch.no_grad():
+                    inputs = (current_spatial, control_normalized, dummy_obs, self.dt)
+                    next_spatial, yobs_normalized = self.rom.predict(inputs)
+                    
+                    next_spatial = torch.clamp(next_spatial, min=0.0)
+                    
+                    if hasattr(self.rom.model, 'encode_initial'):
+                        next_latent = self.rom.model.encode_initial(next_spatial)
                     else:
-                        next_latent = encoder_output
+                        encoder_output = self.rom.model.encoder(next_spatial)
+                        if isinstance(encoder_output, tuple):
+                            next_latent = encoder_output[0]
+                        else:
+                            next_latent = encoder_output
+                
+                if torch.isnan(next_spatial).any() or torch.isnan(yobs_normalized).any():
+                    if t == 0 and k == 0:
+                        print(f"   ⚠️ ROM produced NaN at step {t}.{k}!")
+                    next_spatial = torch.nan_to_num(next_spatial, nan=0.0)
+                    yobs_normalized = torch.nan_to_num(yobs_normalized, nan=0.0)
+                
+                yobs_physical = self._denormalize_observations(yobs_normalized)
+                yobs_physical = torch.clamp(yobs_physical, min=0.0)
+                
+                action_physical_tensor = torch.tensor(
+                    control_physical, dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+                
+                reward = compute_step_reward(
+                    yobs_physical, action_physical_tensor,
+                    self.num_prod, self.num_inj, self.config
+                )
+                
+                sub_reward = float(reward.sum().item())
+                if np.isnan(sub_reward):
+                    sub_reward = 0.0
+                chunk_reward += sub_reward
+                
+                current_spatial = next_spatial
+                current_latent = next_latent
             
-            # Check for NaN in ROM output
-            if torch.isnan(next_spatial).any() or torch.isnan(yobs_normalized).any():
-                if t == 0:
-                    print(f"   ⚠️ ROM produced NaN at step {t}! Spatial NaN: {torch.isnan(next_spatial).any()}, "
-                          f"Obs NaN: {torch.isnan(yobs_normalized).any()}")
-                    print(f"      Input spatial shape: {current_spatial.shape}, range: [{current_spatial.min():.4f}, {current_spatial.max():.4f}]")
-                    print(f"      Control normalized: {control_normalized.cpu().numpy().flatten()}")
-                next_spatial = torch.nan_to_num(next_spatial, nan=0.0)
-                yobs_normalized = torch.nan_to_num(yobs_normalized, nan=0.0)
-            
-            # Denormalize observations to PHYSICAL units
-            yobs_physical = self._denormalize_observations(yobs_normalized)
-            
-            # Clamp to non-negative (same as RL environment)
-            yobs_physical = torch.clamp(yobs_physical, min=0.0)
-            
-            # Create PHYSICAL action tensor for reward calculation
-            action_physical_tensor = torch.tensor(
-                control_physical, dtype=torch.float32, device=self.device
-            ).unsqueeze(0)
-            
-            # Compute reward using PHYSICAL values (same as RL)
-            reward = compute_step_reward(
-                yobs_physical, action_physical_tensor, 
-                self.num_prod, self.num_inj, self.config
-            )
-            
-            # Protect against NaN rewards
-            reward_val = float(reward.sum().item())
-            if np.isnan(reward_val):
-                if t <= 2:
-                    print(f"   ⚠️ NaN reward at step {t}!")
-                    print(f"      Obs physical: {yobs_physical.cpu().numpy().flatten()[:9]}")
-                    print(f"      Action physical: {control_physical}")
-                reward_val = 0.0
-            
-            # Store results
             states.append(next_latent.clone())
             observations.append(yobs_physical.cpu().numpy())
-            rewards.append(reward_val)
-            
-            # Update for next iteration
-            current_spatial = next_spatial
-            current_latent = next_latent
+            rewards.append(chunk_reward)
         
         return states, observations, rewards
 
@@ -591,33 +573,36 @@ class BaseOptimizer(ABC):
             control_physical = control_sequence[t]
             control_normalized = self._prepare_control_for_rom(control_physical)
 
-            with torch.no_grad():
-                current_latent, yobs_normalized = self.rom.predict_latent(
-                    current_latent, self.dt, control_normalized
+            chunk_reward = 0.0
+            for k in range(self.rom_nsteps):
+                with torch.no_grad():
+                    current_latent, yobs_normalized = self.rom.predict_latent(
+                        current_latent, self.dt, control_normalized
+                    )
+
+                if torch.isnan(yobs_normalized).any():
+                    yobs_normalized = torch.nan_to_num(yobs_normalized, nan=0.0)
+
+                yobs_physical = self._denormalize_observations(yobs_normalized)
+                yobs_physical = torch.clamp(yobs_physical, min=0.0)
+
+                action_physical_tensor = torch.tensor(
+                    control_physical, dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+
+                reward = compute_step_reward(
+                    yobs_physical, action_physical_tensor,
+                    self.num_prod, self.num_inj, self.config
                 )
 
-            if torch.isnan(yobs_normalized).any():
-                yobs_normalized = torch.nan_to_num(yobs_normalized, nan=0.0)
-
-            yobs_physical = self._denormalize_observations(yobs_normalized)
-            yobs_physical = torch.clamp(yobs_physical, min=0.0)
-
-            action_physical_tensor = torch.tensor(
-                control_physical, dtype=torch.float32, device=self.device
-            ).unsqueeze(0)
-
-            reward = compute_step_reward(
-                yobs_physical, action_physical_tensor,
-                self.num_prod, self.num_inj, self.config
-            )
-
-            reward_val = float(reward.sum().item())
-            if np.isnan(reward_val):
-                reward_val = 0.0
+                sub_reward = float(reward.sum().item())
+                if np.isnan(sub_reward):
+                    sub_reward = 0.0
+                chunk_reward += sub_reward
 
             states.append(current_latent.clone())
             observations.append(yobs_physical.cpu().numpy())
-            rewards.append(reward_val)
+            rewards.append(chunk_reward)
 
         return states, observations, rewards
     

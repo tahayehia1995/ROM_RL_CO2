@@ -56,8 +56,9 @@ class PolicyEvaluator:
         self.num_injectors = config.rl_model['reservoir']['num_injectors']
         self.num_actions = self.num_producers + self.num_injectors
         
-        # Default max steps per episode
-        self.max_steps = config.rl_model['training']['max_steps_per_episode']
+        # Default max steps per episode (adjusted for multi-step action chunking)
+        rom_nsteps = config.rl_model['environment'].get('rom_nsteps', 1)
+        self.max_steps = config.rl_model['training']['max_steps_per_episode'] // rom_nsteps
         
         # Checkpoint info
         self.checkpoint_path = None

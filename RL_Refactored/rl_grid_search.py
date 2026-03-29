@@ -797,7 +797,8 @@ def run_rl_training(params: Dict, config: Config, z0_options: torch.Tensor,
         torch.cuda.manual_seed_all(seeds['torch'])
 
     max_episodes = params.get('max_episodes', 100)
-    max_steps = params.get('max_steps_per_episode', 30)
+    rom_nsteps = config.rl_model['environment'].get('rom_nsteps', 1)
+    max_steps = params.get('max_steps_per_episode', 30) // rom_nsteps
     batch_size = params.get('replay_batch_size', 256)
     updates_per_step = params.get('updates_per_step', 1)
     exploration_steps = params.get('initial_exploration_steps', 0)
