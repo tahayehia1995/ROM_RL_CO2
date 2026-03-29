@@ -56,9 +56,8 @@ class PolicyEvaluator:
         self.num_injectors = config.rl_model['reservoir']['num_injectors']
         self.num_actions = self.num_producers + self.num_injectors
         
-        # Default max steps per episode (adjusted for multi-step action chunking)
-        rom_nsteps = config.rl_model['environment'].get('rom_nsteps', 1)
-        self.max_steps = config.rl_model['training']['max_steps_per_episode'] // rom_nsteps
+        # Default max steps per episode
+        self.max_steps = config.rl_model['training']['max_steps_per_episode']
         
         # Checkpoint info
         self.checkpoint_path = None
@@ -133,32 +132,23 @@ class PolicyEvaluator:
             # Step environment
             next_state, reward, done = self.environment.step(action)
             
-            # Record data -- expand sub-steps for full time-series visualization
+            # Record data
             reward_value = float(reward.item() if hasattr(reward, 'item') else reward)
-            substep_obs = getattr(self.environment, '_substep_observations', None)
-            substep_rewards = getattr(self.environment, '_substep_rewards', None)
+            step_rewards.append(reward_value)
+            episode_reward += reward_value
             
-            if substep_obs and len(substep_obs) > 1:
-                for sub_obs, sub_r in zip(substep_obs, substep_rewards):
-                    step_rewards.append(float(sub_r))
-                    episode_reward += float(sub_r)
-                    if record_details:
-                        action_physical = self._convert_action_to_physical(action)
-                        actions.append(action_physical)
-                        obs_physical = self._format_observation(sub_obs)
-                        observations.append(obs_physical)
-                        breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
-                        economic_breakdown.append(breakdown)
-            else:
-                step_rewards.append(reward_value)
-                episode_reward += reward_value
-                if record_details:
-                    action_physical = self._convert_action_to_physical(action)
-                    actions.append(action_physical)
-                    obs_physical = self._format_observation(self.environment.last_observation)
-                    observations.append(obs_physical)
-                    breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
-                    economic_breakdown.append(breakdown)
+            if record_details:
+                # Convert action to physical units
+                action_physical = self._convert_action_to_physical(action)
+                actions.append(action_physical)
+                
+                # Get observation in physical units (already physical from env)
+                obs_physical = self._format_observation(self.environment.last_observation)
+                observations.append(obs_physical)
+                
+                # Calculate economic breakdown
+                breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
+                economic_breakdown.append(breakdown)
             
             state = next_state
             
@@ -295,28 +285,16 @@ class PolicyEvaluator:
                 next_state, reward, done = self.environment.step(action)
                 
                 reward_value = float(reward.item() if hasattr(reward, 'item') else reward)
-                substep_obs = getattr(self.environment, '_substep_observations', None)
-                substep_rewards = getattr(self.environment, '_substep_rewards', None)
+                step_rewards.append(reward_value)
+                episode_reward += reward_value
                 
-                if substep_obs and len(substep_obs) > 1:
-                    for sub_obs, sub_r in zip(substep_obs, substep_rewards):
-                        step_rewards.append(float(sub_r))
-                        episode_reward += float(sub_r)
-                        action_physical = self._convert_action_to_physical(action)
-                        actions.append(action_physical)
-                        obs_physical = self._format_observation(sub_obs)
-                        observations.append(obs_physical)
-                        breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
-                        economic_breakdown.append(breakdown)
-                else:
-                    step_rewards.append(reward_value)
-                    episode_reward += reward_value
-                    action_physical = self._convert_action_to_physical(action)
-                    actions.append(action_physical)
-                    obs_physical = self._format_observation(self.environment.last_observation)
-                    observations.append(obs_physical)
-                    breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
-                    economic_breakdown.append(breakdown)
+                # Record details
+                action_physical = self._convert_action_to_physical(action)
+                actions.append(action_physical)
+                obs_physical = self._format_observation(self.environment.last_observation)
+                observations.append(obs_physical)
+                breakdown = self._calculate_economic_breakdown(obs_physical, action_physical)
+                economic_breakdown.append(breakdown)
                 
                 state = next_state
                 if done:

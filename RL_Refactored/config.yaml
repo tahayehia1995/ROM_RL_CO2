@@ -312,7 +312,6 @@ rl_model:
       
     # Episode termination
     max_episode_steps: 30               # Maximum steps before episode termination
-    rom_nsteps: 1                       # ROM training n_steps (auto-detected from model filename; each RL step applies action for this many ROM transitions)
     
   # ===== ACTION VARIATION ENHANCEMENT =====
   action_variation:

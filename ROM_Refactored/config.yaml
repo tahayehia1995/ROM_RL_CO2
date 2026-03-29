@@ -237,7 +237,7 @@ decoder:
   use_exact_dimensions: true
   norm_type: batchnorm
 transition:
-  type: mamba2
+  type: linear
   encoder_hidden_dims:
   - 300
   - 300

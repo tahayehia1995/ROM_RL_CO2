@@ -211,8 +211,7 @@ class RLTrainingDashboard:
         Returns:
             mean_eval_npv: Mean NPV across evaluated cases
         """
-        rom_nsteps = self.config.rl_model['environment'].get('rom_nsteps', 1)
-        max_steps = self.config.rl_model['training']['max_steps_per_episode'] // rom_nsteps
+        max_steps = self.config.rl_model['training']['max_steps_per_episode']
         total_available = z0_options.shape[0]
         num_cases = min(num_cases, total_available)
         
@@ -418,10 +417,7 @@ class RLTrainingDashboard:
             # Training parameters
             training_config = self.config.rl_model['training']
             max_episodes = training_config['max_episodes']
-            rom_nsteps = self.config.rl_model['environment'].get('rom_nsteps', 1)
-            max_steps = training_config['max_steps_per_episode'] // rom_nsteps
-            if rom_nsteps > 1:
-                print(f"🔄 Multi-step chunking active: {training_config['max_steps_per_episode']} ROM steps / {rom_nsteps} = {max_steps} RL decisions per episode")
+            max_steps = training_config['max_steps_per_episode']
             batch_size = self.config.rl_model['replay_memory']['batch_size']
             updates_per_step = training_config['updates_per_step']
             save_interval = 100
@@ -494,28 +490,15 @@ class RLTrainingDashboard:
                         # Step environment
                         next_state, reward, done = self.environment.step(action)
                         
-                        # Record step data for all ROM sub-steps (for visualization)
-                        substep_obs = getattr(self.environment, '_substep_observations', None)
-                        substep_rewards = getattr(self.environment, '_substep_rewards', None)
-                        if substep_obs and len(substep_obs) > 1:
-                            for si, (sub_obs, sub_r) in enumerate(zip(substep_obs, substep_rewards)):
-                                rom_step = step * rom_nsteps + si
-                                self.training_orchestrator.record_step_data(
-                                    step=rom_step,
-                                    action=action,
-                                    observation=sub_obs,
-                                    reward=torch.tensor(sub_r),
-                                    state=state
-                                )
-                        else:
-                            observation = getattr(self.environment, 'last_observation', None)
-                            self.training_orchestrator.record_step_data(
-                                step=step,
-                                action=action,
-                                observation=observation,
-                                reward=reward,
-                                state=state
-                            )
+                        # Record step data
+                        observation = getattr(self.environment, 'last_observation', None)
+                        self.training_orchestrator.record_step_data(
+                            step=step,
+                            action=action,
+                            observation=observation,
+                            reward=reward,
+                            state=state
+                        )
                         
                         self.total_numsteps += 1
                         step_rewards.append(reward.item())
