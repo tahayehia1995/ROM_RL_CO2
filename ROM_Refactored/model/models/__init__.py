@@ -16,6 +16,7 @@ from .encoder import Encoder
 from .decoder import Decoder
 from .mse2c import MSE2C
 from .gnn import GNNE2C, GNN_AVAILABLE
+from .fno import FNOE2C, FNO_AVAILABLE
 
 __all__ = [
     'create_trans_encoder',
@@ -36,4 +37,6 @@ __all__ = [
     'MSE2C',
     'GNNE2C',
     'GNN_AVAILABLE',
+    'FNOE2C',
+    'FNO_AVAILABLE',
 ]

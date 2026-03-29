@@ -1664,6 +1664,8 @@ class RLConfigurationDashboard:
 
         if model_info.get('gnn') or '_gnn' in filename:
             encoding = 'GNN'
+        elif model_info.get('fno') or '_fno' in filename:
+            encoding = 'FNO'
         elif model_info.get('multimodal') or '_mm' in filename:
             encoding = 'MM'
         else:
@@ -1755,13 +1757,19 @@ class RLConfigurationDashboard:
         elif '_gnnF' in filename:
             info['gnn'] = False
         
+        # Detect FNO flag (fnoT = FNO enabled, fnoF = disabled)
+        if '_fnoT' in filename:
+            info['fno'] = True
+        elif '_fnoF' in filename:
+            info['fno'] = False
+        
         # Detect normalization type (normba = batchnorm, normgd = gdn)
         norm_match = re.search(r'_norm(ba|gd)', filename)
         if norm_match:
             info['norm_type'] = 'batchnorm' if norm_match.group(1) == 'ba' else 'gdn'
         
         # Detect transition type (trnCLRU, trnMAMBA2, etc.)
-        trn_match = re.search(r'_trn([A-Za-z0-9_]+?)(?=\.|\b|_(?:run|bs|ld|ns|ch|sch|rb|norm|ehd|fft|mask|mm|gnn))', filename)
+        trn_match = re.search(r'_trn([A-Za-z0-9_]+?)(?=\.|\b|_(?:run|bs|ld|ns|ch|sch|rb|norm|ehd|fft|mask|mm|gnn|fno))', filename)
         if not trn_match:
             trn_match = re.search(r'_trn([A-Z0-9_]+)', filename)
         if trn_match:
@@ -1907,6 +1915,16 @@ class RLConfigurationDashboard:
             return isinstance(payload, dict) and payload.get('_gnn', False)
         except Exception as e:
             print(f"      ⚠️ Error detecting GNN mode: {e}")
+            return False
+
+    def _detect_fno_from_weights(self, encoder_file):
+        """Detect if encoder weights were saved by FNOE2C."""
+        try:
+            import torch
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return isinstance(payload, dict) and payload.get('_fno', False)
+        except Exception as e:
+            print(f"      ⚠️ Error detecting FNO mode: {e}")
             return False
 
     def _detect_decoder_type_from_weights(self, decoder_file):
@@ -3042,8 +3060,19 @@ Where:
                 if is_gnn:
                     print(f"      📊 GNN detected from weights: {is_gnn}")
             
-            # Detect multimodal mode: first from filename, then from encoder weights
+            # Detect FNO mode: first from filename, then from encoder weights
             if is_gnn:
+                is_fno = False
+            elif 'fno' in model_info:
+                is_fno = model_info['fno']
+                print(f"      📊 FNO detected from filename: {is_fno}")
+            else:
+                is_fno = self._detect_fno_from_weights(encoder_file)
+                if is_fno:
+                    print(f"      📊 FNO detected from weights: {is_fno}")
+            
+            # Detect multimodal mode: first from filename, then from encoder weights
+            if is_gnn or is_fno:
                 is_multimodal = False
             elif 'multimodal' in model_info:
                 is_multimodal = model_info['multimodal']
@@ -3067,6 +3096,16 @@ Where:
                     if isinstance(rom_config.config['data']['input_shape'], list):
                         rom_config.config['data']['input_shape'][0] = 4
             
+            # Update FNO config
+            rom_config.config.setdefault('fno', {})['enable'] = is_fno
+            if is_fno:
+                rom_config.model['n_channels'] = 4
+                if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+                    if isinstance(rom_config.config['data']['input_shape'], list):
+                        rom_config.config['data']['input_shape'][0] = 4
+                rom_config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+                print(f"      ✅ FNO enabled: fno.enable=True")
+            
             if 'multimodal' not in rom_config.config:
                 rom_config.config['multimodal'] = {}
             current_mm = rom_config.config['multimodal'].get('enable', False)
@@ -3075,8 +3114,8 @@ Where:
                 print(f"      ✅ Updated multimodal.enable: {current_mm} → {is_multimodal}")
                 config_updated = True
             
-            # For multimodal models, ensure latent dim split is consistent
-            if is_multimodal:
+            # For multimodal/FNO models, ensure latent dim split is consistent
+            if is_multimodal or is_fno:
                 latent_dim = rom_config.model.get('latent_dim', 128)
                 static_ld = rom_config.config.get('multimodal', {}).get('static_latent_dim', 32)
                 dynamic_ld = rom_config.config.get('multimodal', {}).get('dynamic_latent_dim', 96)
@@ -3136,6 +3175,7 @@ Where:
             model_cls = type(self.loaded_rom_model.model).__name__
             print(f"   ✅ Model instantiated as: {model_cls}")
             print(f"      gnn.enable={rom_config.config.get('gnn', {}).get('enable', False)}, "
+                  f"fno.enable={rom_config.config.get('fno', {}).get('enable', False)}, "
                   f"multimodal.enable={rom_config.config.get('multimodal', {}).get('enable', False)}")
             print(f"      Has encode_initial: {hasattr(self.loaded_rom_model.model, 'encode_initial')}")
             

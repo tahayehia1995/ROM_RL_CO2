@@ -22,6 +22,7 @@ from .individual_losses import (
     get_jacobian_reg_loss,
     get_cycle_consistency_loss,
     get_dissipativity_loss,
+    get_invertibility_loss,
     get_reversibility_loss,
     get_sindy_sparsity_loss,
     get_sindy_consistency_loss,
@@ -121,8 +122,9 @@ class CustomizedLoss(nn.Module):
         # Per-element loss normalization configuration
         self.enable_per_element_normalization = config['loss'].get('enable_per_element_normalization', False)
         
-        # Detect multimodal mode (reconstruction uses dynamic channels only)
-        self.is_multimodal = config.config.get('multimodal', {}).get('enable', False)
+        # Detect multimodal/FNO mode (reconstruction uses dynamic channels only)
+        self.is_multimodal = (config.config.get('multimodal', {}).get('enable', False)
+                              or config.config.get('fno', {}).get('enable', False))
         
         # Calculate normalization factors based on system dimensions
         if self.enable_per_element_normalization:
@@ -238,6 +240,10 @@ class CustomizedLoss(nn.Module):
         self.enable_dissipativity_loss = config.loss.get('enable_dissipativity_loss', False)
         self.dissipativity_loss_lambda = config.loss.get('lambda_dissipativity_loss', 0.01)
         self.dissipativity_loss = torch.tensor(0.0)
+
+        self.enable_invertibility_loss = config.loss.get('enable_invertibility_loss', False)
+        self.invertibility_loss_lambda = config.loss.get('lambda_invertibility_loss', 0.1)
+        self.invertibility_loss = torch.tensor(0.0)
 
         self.enable_reversibility_loss = config.loss.get('enable_reversibility_loss', False)
         self.reversibility_loss_lambda = config.loss.get('lambda_reversibility_loss', 0.1)
@@ -549,9 +555,16 @@ class CustomizedLoss(nn.Module):
         self.non_negative_loss = non_negative_loss
         self.kl_loss = kl_loss
 
+        # FNO invertibility loss (if available from FNOE2C)
+        self.invertibility_loss = torch.tensor(0.0, device=x0.device)
+        model_ref = getattr(self, '_model_ref', None)
+        if self.enable_invertibility_loss and model_ref is not None and hasattr(model_ref, 'get_invertibility_loss'):
+            inv_loss = model_ref.get_invertibility_loss()
+            if inv_loss is not None:
+                self.invertibility_loss = inv_loss
+
         # GNN well-node readout auxiliary loss (if available from GNNE2C)
         self.well_readout_loss = 0
-        model_ref = getattr(self, '_model_ref', None)
         if model_ref is not None and hasattr(model_ref, 'get_well_readout_loss'):
             aux = model_ref.get_well_readout_loss()
             if aux is not None:
@@ -701,6 +714,7 @@ class CustomizedLoss(nn.Module):
                     self.kl_loss_lambda * kl_loss +
                     self.fft_loss_lambda * fft_loss +
                     self.well_readout_loss +
+                    self.invertibility_loss_lambda * self.invertibility_loss +
                     self.eigloss_lambda * eigloss +
                     self.consistency_loss_lambda * consistency_loss +
                     self.energy_loss_lambda * energy_loss +
@@ -731,6 +745,7 @@ class CustomizedLoss(nn.Module):
                     self.kl_loss_lambda * kl_loss +
                     self.fft_loss_lambda * fft_loss +
                     self.well_readout_loss +
+                    self.invertibility_loss_lambda * self.invertibility_loss +
                     self.eigloss_lambda * eigloss +
                     self.consistency_loss_lambda * consistency_loss +
                     self.energy_loss_lambda * energy_loss +
@@ -755,6 +770,7 @@ class CustomizedLoss(nn.Module):
                 self.kl_loss_lambda * kl_loss +
                 self.fft_loss_lambda * fft_loss +
                 self.well_readout_loss +
+                self.invertibility_loss_lambda * self.invertibility_loss +
                 self.attractor_loss +
                 self.eigloss_lambda * eigloss +
                 self.consistency_loss_lambda * consistency_loss +
@@ -821,6 +837,10 @@ class CustomizedLoss(nn.Module):
     def getDissipativityLoss(self):
         """Get dissipativity loss (Dissipative Koopman)."""
         return self.dissipativity_loss
+
+    def getInvertibilityLoss(self):
+        """Get invertibility loss (FNO encoder-decoder)."""
+        return self.invertibility_loss
 
     def getReversibilityLoss(self):
         """Get reversibility loss (IS-FNO)."""

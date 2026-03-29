@@ -128,6 +128,10 @@ def _parse_model_filename(filename: str) -> Dict:
         info['gnn'] = True
     elif '_gnnF' in filename:
         info['gnn'] = False
+    if '_fnoT' in filename:
+        info['fno'] = True
+    elif '_fnoF' in filename:
+        info['fno'] = False
     norm_m = re.search(r'_norm(ba|gd)', filename)
     if norm_m:
         info['norm_type'] = 'batchnorm' if norm_m.group(1) == 'ba' else 'gdn'
@@ -141,6 +145,8 @@ def _model_display_name(filename: str, info: Dict) -> str:
     parts = []
     if info.get('gnn'):
         parts.append("GNN")
+    if info.get('fno'):
+        parts.append("FNO")
     if 'batch_size' in info:
         parts.append(f"bs={info['batch_size']}")
     if 'latent_dim' in info:
@@ -168,6 +174,14 @@ def _detect_gnn(encoder_file: str) -> bool:
     try:
         payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
         return isinstance(payload, dict) and payload.get('_gnn', False)
+    except Exception:
+        return False
+
+
+def _detect_fno(encoder_file: str) -> bool:
+    try:
+        payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+        return isinstance(payload, dict) and payload.get('_fno', False)
     except Exception:
         return False
 
@@ -284,9 +298,18 @@ def load_rom_model(model_entry: Dict, device: torch.device) -> Tuple[ROMWithE2C,
         rom_config.config.setdefault('decoder', {})['norm_type'] = info['norm_type']
 
     is_gnn = info.get('gnn', _detect_gnn(model_entry['encoder']))
+    is_fno = info.get('fno', _detect_fno(model_entry['encoder']))
     is_mm = info.get('multimodal', _detect_multimodal(model_entry['encoder']))
 
     if is_gnn:
+        is_mm = False
+        is_fno = False
+        n_channels = 4
+        rom_config.model['n_channels'] = n_channels
+        if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+            if isinstance(rom_config.config['data']['input_shape'], list):
+                rom_config.config['data']['input_shape'][0] = n_channels
+    elif is_fno:
         is_mm = False
         n_channels = 4
         rom_config.model['n_channels'] = n_channels
@@ -295,8 +318,9 @@ def load_rom_model(model_entry: Dict, device: torch.device) -> Tuple[ROMWithE2C,
                 rom_config.config['data']['input_shape'][0] = n_channels
 
     rom_config.config.setdefault('gnn', {})['enable'] = is_gnn
+    rom_config.config.setdefault('fno', {})['enable'] = is_fno
     rom_config.config.setdefault('multimodal', {})['enable'] = is_mm
-    if is_mm:
+    if is_mm or is_fno:
         ld = rom_config.model.get('latent_dim', 128)
         sld = rom_config.config['multimodal'].get('static_latent_dim', 32)
         rom_config.config['multimodal']['dynamic_latent_dim'] = ld - sld

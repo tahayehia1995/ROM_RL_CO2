@@ -191,7 +191,8 @@ class BaseOptimizer(ABC):
             trn_type = self.config.config.get('transition', {}).get('type', 'linear')
             is_mm = self.config.config.get('multimodal', {}).get('enable', False)
             is_gnn = self.config.config.get('gnn', {}).get('enable', False)
-            arch = 'gnn' if is_gnn else ('mm' if is_mm else 'base')
+            is_fno = self.config.config.get('fno', {}).get('enable', False)
+            arch = 'gnn' if is_gnn else ('fno' if is_fno else ('mm' if is_mm else 'base'))
 
             run_name = f"{optimizer_type}_{arch}_{trn_type}_{rom_model_name}"
 

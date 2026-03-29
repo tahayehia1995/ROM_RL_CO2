@@ -61,6 +61,8 @@ class WandBLogger:
             result['multimodal'] = mm_cfg.get('enable', False)
             gnn_cfg = config.config.get('gnn', {})
             result['gnn'] = gnn_cfg.get('enable', False)
+            fno_cfg = config.config.get('fno', {})
+            result['fno'] = fno_cfg.get('enable', False)
         except Exception:
             pass
 

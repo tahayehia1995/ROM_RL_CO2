@@ -1008,6 +1008,14 @@ class OptimizerConfigDashboard:
         if not info.get('gnn') and '_gnn' in filename and '_gnnF' not in filename:
             info['gnn'] = True
         
+        # Detect FNO flag
+        if '_fnoT' in filename or '_fno_' in filename or filename.endswith('_fno.h5') or re.search(r'_fno[_.]', filename):
+            info['fno'] = True
+        elif '_fnoF' in filename:
+            info['fno'] = False
+        if not info.get('fno') and '_fno' in filename and '_fnoF' not in filename:
+            info['fno'] = True
+        
         # Detect normalization type
         norm_match = re.search(r'_norm(ba|gd)', filename)
         if norm_match:
@@ -1026,6 +1034,8 @@ class OptimizerConfigDashboard:
 
         if info.get('gnn'):
             encoding = 'GNN'
+        elif info.get('fno'):
+            encoding = 'FNO'
         elif info.get('multimodal'):
             encoding = 'MM'
         else:
@@ -1350,8 +1360,16 @@ class OptimizerConfigDashboard:
         if is_gnn:
             print(f"   📊 GNN: {is_gnn}")
 
-        # Detect multimodal mode from filename or encoder weights
+        # Detect FNO mode from filename or encoder weights
         if is_gnn:
+            is_fno = False
+        else:
+            is_fno = model_info.get('fno', self._detect_fno_from_weights(encoder_file))
+        if is_fno:
+            print(f"   📊 FNO: {is_fno}")
+
+        # Detect multimodal mode from filename or encoder weights
+        if is_gnn or is_fno:
             is_multimodal = False
         elif 'multimodal' in model_info:
             is_multimodal = model_info['multimodal']
@@ -1360,9 +1378,8 @@ class OptimizerConfigDashboard:
             is_multimodal = self._detect_multimodal_from_weights(encoder_file)
             print(f"   📊 Multimodal: {is_multimodal} (from weights)")
         
-        if 'gnn' not in rom_config.config:
-            rom_config.config['gnn'] = {}
-        rom_config.config['gnn']['enable'] = is_gnn
+        rom_config.config.setdefault('gnn', {})['enable'] = is_gnn
+        rom_config.config.setdefault('fno', {})['enable'] = is_fno
 
         if is_gnn:
             rom_config.model['n_channels'] = 4
@@ -1370,11 +1387,16 @@ class OptimizerConfigDashboard:
                 if isinstance(rom_config.config['data']['input_shape'], list):
                     rom_config.config['data']['input_shape'][0] = 4
 
-        if 'multimodal' not in rom_config.config:
-            rom_config.config['multimodal'] = {}
-        rom_config.config['multimodal']['enable'] = is_multimodal
+        if is_fno:
+            rom_config.model['n_channels'] = 4
+            if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+                if isinstance(rom_config.config['data']['input_shape'], list):
+                    rom_config.config['data']['input_shape'][0] = 4
+            rom_config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+
+        rom_config.config.setdefault('multimodal', {})['enable'] = is_multimodal
         
-        if is_multimodal:
+        if is_multimodal or is_fno:
             latent_dim = rom_config.model.get('latent_dim', 128)
             static_ld = rom_config.config['multimodal'].get('static_latent_dim', 32)
             dynamic_ld = rom_config.config['multimodal'].get('dynamic_latent_dim', 96)
@@ -1472,6 +1494,14 @@ class OptimizerConfigDashboard:
         try:
             payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
             return isinstance(payload, dict) and payload.get('_gnn', False)
+        except:
+            return False
+
+    def _detect_fno_from_weights(self, encoder_file: str) -> bool:
+        """Detect if encoder weights were saved by FNOE2C."""
+        try:
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return isinstance(payload, dict) and payload.get('_fno', False)
         except:
             return False
 

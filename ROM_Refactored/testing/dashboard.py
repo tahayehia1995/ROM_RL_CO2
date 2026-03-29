@@ -434,6 +434,8 @@ class TestingDashboard:
 
                         if '_gnn' in run_id:
                             encoding = 'GNN'
+                        elif '_fno' in run_id:
+                            encoding = 'FNO'
                         elif '_mm' in run_id:
                             encoding = 'Multimodal'
                         else:
@@ -457,6 +459,8 @@ class TestingDashboard:
                         transition = trn_match.group(1) if trn_match else 'LINEAR'
                         if '_gnn' in run_id:
                             enc = 'GNN'
+                        elif '_fno' in run_id:
+                            enc = 'FNO'
                         elif '_mm' in run_id:
                             enc = 'MM'
                         else:
@@ -486,7 +490,7 @@ class TestingDashboard:
             (state_dict, is_multimodal_or_gnn)
         """
         if isinstance(payload, dict):
-            if payload.get('_multimodal', False) or payload.get('_gnn', False):
+            if payload.get('_multimodal', False) or payload.get('_gnn', False) or payload.get('_fno', False):
                 if 'dynamic_encoder' in payload:
                     return payload['dynamic_encoder'], True
                 if 'static_encoder' in payload:
@@ -539,12 +543,14 @@ class TestingDashboard:
                 return payload['fc_mean.weight'].shape[0]
 
             # Multimodal / GNN encoder — sum branch latent dims
-            if isinstance(payload, dict) and (payload.get('_multimodal') or payload.get('_gnn')):
+            if isinstance(payload, dict) and (payload.get('_multimodal') or payload.get('_gnn') or payload.get('_fno')):
                 total = 0
                 for branch in ('static_encoder', 'dynamic_encoder'):
                     branch_sd = payload.get(branch, {})
                     if 'fc_mean.weight' in branch_sd:
                         total += branch_sd['fc_mean.weight'].shape[0]
+                    elif 'fc.weight' in branch_sd:
+                        total += branch_sd['fc.weight'].shape[0]
                     elif 'grid_pool.fc.weight' in branch_sd:
                         total += branch_sd['grid_pool.fc.weight'].shape[0]
                     elif 'pool.proj.weight' in branch_sd:
@@ -736,6 +742,7 @@ class TestingDashboard:
             
             # Detect model type from encoder weights or filename
             gnn_detected = False
+            fno_detected = False
             multimodal_detected = False
             enc_payload = None
             if encoder_file:
@@ -745,6 +752,8 @@ class TestingDashboard:
                     if isinstance(enc_payload, dict):
                         if enc_payload.get('_gnn', False):
                             gnn_detected = True
+                        elif enc_payload.get('_fno', False):
+                            fno_detected = True
                         elif enc_payload.get('_multimodal', False):
                             multimodal_detected = True
                 except Exception:
@@ -752,7 +761,9 @@ class TestingDashboard:
                 fname = os.path.basename(encoder_file)
                 if not gnn_detected and '_gnnT' in fname:
                     gnn_detected = True
-                if not multimodal_detected and not gnn_detected and '_mmT' in fname:
+                if not fno_detected and not gnn_detected and '_fnoT' in fname:
+                    fno_detected = True
+                if not multimodal_detected and not gnn_detected and not fno_detected and '_mmT' in fname:
                     multimodal_detected = True
 
             # Detect transition type from actual transition weights (not filename)
@@ -920,25 +931,26 @@ class TestingDashboard:
                 if 'multimodal' not in config.config:
                     config.config['multimodal'] = {}
                 config.config['multimodal']['enable'] = False
+                config.config.setdefault('fno', {})['enable'] = False
                 if 'loss' not in config.config:
                     config.config['loss'] = {}
                 config.config['loss']['enable_inactive_masking'] = True
                 print(f"   GNN model detected: gnn.enable=True, multimodal.enable=False")
+            elif fno_detected:
+                config.config.setdefault('fno', {})['enable'] = True
+                config.config.setdefault('gnn', {})['enable'] = False
+                config.config.setdefault('multimodal', {})['enable'] = False
+                config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+                print(f"   FNO model detected: fno.enable=True")
             elif multimodal_detected:
-                if 'gnn' not in config.config:
-                    config.config['gnn'] = {}
-                config.config['gnn']['enable'] = False
-                if 'multimodal' not in config.config:
-                    config.config['multimodal'] = {}
-                config.config['multimodal']['enable'] = True
+                config.config.setdefault('gnn', {})['enable'] = False
+                config.config.setdefault('fno', {})['enable'] = False
+                config.config.setdefault('multimodal', {})['enable'] = True
                 print(f"   Multimodal model detected: multimodal.enable=True")
             else:
-                if 'gnn' not in config.config:
-                    config.config['gnn'] = {}
-                config.config['gnn']['enable'] = False
-                if 'multimodal' not in config.config:
-                    config.config['multimodal'] = {}
-                config.config['multimodal']['enable'] = False
+                config.config.setdefault('gnn', {})['enable'] = False
+                config.config.setdefault('fno', {})['enable'] = False
+                config.config.setdefault('multimodal', {})['enable'] = False
 
             # Update transition type if detected from filename
             if transition_type_detected:

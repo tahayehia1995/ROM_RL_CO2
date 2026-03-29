@@ -73,6 +73,30 @@ gnn:
     broadcast_num_layers: 4
   pooling: attention
   mask_file_path: sr3_batch_output/inactive_cell_locations.h5
+fno:
+  enable: false
+  encoder:
+    width: 32
+    n_layers: 4
+    n_modes:
+    - 12
+    - 8
+    - 10
+    activation: gelu
+    residual_alpha: 0.1
+  decoder:
+    width: 32
+    n_layers: 4
+    n_modes:
+    - 12
+    - 8
+    - 10
+  latent_truncation:
+    spatial_modes:
+    - 4
+    - 4
+    - 4
+    channels: 16
 data:
   input_shape:
   - 4
@@ -451,6 +475,8 @@ loss:
   lambda_energy_loss: 0.1
   enable_dissipativity_loss: true
   lambda_dissipativity_loss: 0.01
+  enable_invertibility_loss: false
+  lambda_invertibility_loss: 0.1
   enable_reversibility_loss: true
   lambda_reversibility_loss: 0.1
   enable_sindy_sparsity_loss: true

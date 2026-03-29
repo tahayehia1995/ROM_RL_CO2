@@ -44,7 +44,7 @@ from model.training.rom_wrapper import ROMWithE2C
 HYPERPARAMETER_GRID = {
     # Existing parameters
     'batch_size': [16],
-    'n_steps': [5],  # Available processed data files
+    'n_steps': [2],  # Available processed data files
     'n_channels': [4],  # Number of channels (2 for SW/SG, 4 for SW/SG/PRES/PERMI, etc.)
     'latent_dim': [128],
     # Learning rate scheduler
@@ -85,8 +85,11 @@ HYPERPARAMETER_GRID = {
     # GNN (Graph Neural Network encoder/decoder) - requires n_channels=4, torch_geometric
     'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
+    # FNO (Fourier Neural Operator encoder/decoder) - invertible spectral convolution, requires n_channels=4
+    'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
+    
     # Transition model type
-    'transition_type': ['clru'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
+    'transition_type': ['mamba2'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
     
     # Encoder enhancement strategies (reduce re-encoding error accumulation)
     'enable_jacobian_loss': [False],      # Contractive encoder via Jacobian regularization
@@ -335,9 +338,19 @@ def validate_hyperparameter_combination(hyperparams: Dict[str, Any]) -> Tuple[bo
     if gnn_enable and hyperparams.get('n_channels', 2) != 4:
         return False, "GNN mode requires n_channels=4 (SG, PRES, PERMI, POROS)"
     
-    # GNN and multimodal are mutually exclusive (GNN handles static/dynamic split internally)
+    # GNN includes static/dynamic split internally — auto-override multimodal
     if gnn_enable and mm_enable:
-        return False, "GNN and multimodal cannot both be enabled (GNN includes multimodal split)"
+        hyperparams['enable_multimodal'] = False
+    
+    # Validate FNO
+    fno_enable = hyperparams.get('enable_fno', False)
+    if fno_enable and hyperparams.get('n_channels', 2) != 4:
+        return False, "FNO mode requires n_channels=4 (SG, PRES, PERMI, POROS)"
+    if fno_enable and gnn_enable:
+        return False, "FNO and GNN cannot both be enabled"
+    # FNO includes static/dynamic split internally — auto-override multimodal
+    if fno_enable and mm_enable:
+        hyperparams['enable_multimodal'] = False
     
     return True, None
 
@@ -562,6 +575,10 @@ def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
     if gnn_enable:
         parts.append("gnn")
     
+    fno_enable = hyperparams.get('enable_fno', False)
+    if fno_enable:
+        parts.append("fno")
+    
     # Transition type
     trn = hyperparams.get('transition_type', 'linear')
     if trn != 'linear':
@@ -570,24 +587,39 @@ def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
     return '_'.join(parts)
 
 
-def create_run_name(hyperparams: Dict[str, Any], run_index: int) -> str:
+def create_run_name(hyperparams: Dict[str, Any], run_index: int,
+                    epochs: int = None, learning_rate: float = None) -> str:
     """
     Create a human-readable run name for wandb.
     
     Args:
         hyperparams: Dictionary of hyperparameters
         run_index: Index of the run
+        epochs: Number of training epochs (from config)
+        learning_rate: Learning rate value (from config)
         
     Returns:
         String run name
     """
     parts = []
     
+    # Transition model name (always first for clarity)
+    trn = hyperparams.get('transition_type', 'linear')
+    parts.append(f"trn{trn.upper()}")
+    
     # Base parameters
     parts.append(f"bs{hyperparams['batch_size']}")
     parts.append(f"ld{hyperparams['latent_dim']}")
     parts.append(f"ns{hyperparams['n_steps']}")
     parts.append(f"ch{hyperparams['n_channels']}")
+    
+    # Epochs
+    if epochs is not None:
+        parts.append(f"ep{epochs}")
+    
+    # Learning rate
+    if learning_rate is not None:
+        parts.append(f"lr{learning_rate:.0e}")
     
     # Scheduler (abbreviated)
     scheduler_type = hyperparams.get('lr_scheduler_type', 'fixed')
@@ -636,6 +668,11 @@ def create_run_name(hyperparams: Dict[str, Any], run_index: int) -> str:
     gnn_enable = hyperparams.get('enable_gnn', False)
     if gnn_enable:
         parts.append("gnn")
+    
+    # FNO (only if enabled)
+    fno_enable = hyperparams.get('enable_fno', False)
+    if fno_enable:
+        parts.append("fno")
     
     return '_'.join(parts)
 
@@ -953,6 +990,21 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
             config.config['gnn'] = {}
         config.config['gnn']['enable'] = False
     
+    # Update FNO configuration
+    if hyperparams.get('enable_fno', False):
+        if 'fno' not in config.config:
+            config.config['fno'] = {}
+        config.config['fno']['enable'] = True
+        config.config['multimodal']['enable'] = False
+        config.config['gnn']['enable'] = False
+        if 'loss' not in config.config:
+            config.config['loss'] = {}
+        config.config['loss']['enable_invertibility_loss'] = True
+    else:
+        if 'fno' not in config.config:
+            config.config['fno'] = {}
+        config.config['fno']['enable'] = False
+    
     # Encoder enhancement: Jacobian regularization
     if 'enable_jacobian_loss' in hyperparams:
         if 'loss' not in config.config:
@@ -1256,6 +1308,12 @@ def run_single_training(config_path: str, hyperparams: Dict[str, Any], run_index
         # Create config with hyperparameters
         config = update_config_with_hyperparams(config_path, hyperparams)
         
+        # Re-create run_name with epochs and learning rate from config
+        cfg_epochs = config.training.get('epoch', None)
+        cfg_lr = config.training.get('learning_rate', None)
+        run_name = create_run_name(hyperparams, run_index,
+                                   epochs=cfg_epochs, learning_rate=cfg_lr)
+        
         # Update wandb config for this run
         if 'wandb' not in config.config['runtime']:
             config.config['runtime']['wandb'] = {}
@@ -1407,8 +1465,9 @@ def main():
     print("\n🚀 Starting grid search...")
     print("=" * 80)
     
-    # Get default learning_rate from config for display
+    # Get default learning_rate and epochs from config for display
     default_lr = base_config.training['learning_rate']
+    default_epochs = base_config.training.get('epoch', None)
     
     print(f"\n📋 Using fixed hyperparameters:")
     print(f"   Learning rate: {default_lr:.0e} (FIXED - from config, will not vary)")
@@ -1429,7 +1488,7 @@ def main():
     print("=" * 80)
     
     for idx, hyperparams in enumerate(combinations, 1):
-        print(f"\n[{idx}/{total_runs}] Running: {create_run_name(hyperparams, idx)}")
+        print(f"\n[{idx}/{total_runs}] Running: {create_run_name(hyperparams, idx, epochs=default_epochs, learning_rate=default_lr)}")
         print(f"   Batch size: {hyperparams['batch_size']}, "
               f"Latent dim: {hyperparams['latent_dim']}, "
               f"N-steps: {hyperparams['n_steps']}, "
@@ -1773,7 +1832,9 @@ def validate_setup(config_path: str = None, test_single_run: bool = False) -> bo
             
             # Test run ID and name generation
             run_id = create_run_id(first_combo, 1)
-            run_name = create_run_name(first_combo, 1)
+            _ep = config.training.get('epoch', None)
+            _lr = config.training.get('learning_rate', None)
+            run_name = create_run_name(first_combo, 1, epochs=_ep, learning_rate=_lr)
             print(f"   ✅ Run ID: {run_id}")
             print(f"   ✅ Run name: {run_name}")
             

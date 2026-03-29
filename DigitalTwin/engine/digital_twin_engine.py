@@ -206,6 +206,8 @@ class DigitalTwinEngine:
             fname_lower = enc_name.lower()
             if "_gnn" in fname_lower and "_mm" not in fname_lower:
                 mtype = "gnn"
+            elif "_fno" in fname_lower:
+                mtype = "fno"
             elif "_mm" in fname_lower:
                 mtype = "multimodal"
             else:
@@ -263,6 +265,8 @@ class DigitalTwinEngine:
                     mtype = "multimodal"
                 elif payload.get("_gnn"):
                     mtype = "gnn"
+                elif payload.get("_fno"):
+                    mtype = "fno"
         except Exception:
             pass
 
@@ -278,9 +282,11 @@ class DigitalTwinEngine:
         # Build fresh config with correct overrides
         cfg = Config(self._rom_cfg_path)
         gnn_cfg = cfg.config.setdefault("gnn", {})
+        fno_cfg = cfg.config.setdefault("fno", {})
         mm_cfg = cfg.config.setdefault("multimodal", {})
 
         gnn_cfg["enable"] = (mtype == "gnn")
+        fno_cfg["enable"] = (mtype == "fno")
         mm_cfg["enable"] = (mtype == "multimodal")
         cfg.config.setdefault("transition", {})["type"] = ttype
         cfg.config.setdefault("loss", {})["enable_inactive_masking"] = False

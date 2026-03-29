@@ -18,10 +18,14 @@ class ROMWithE2C(nn.Module):
         # Select model type from config
         if config.model['method'] == 'E2C':
             gnn_enabled = config.config.get('gnn', {}).get('enable', False)
+            fno_enabled = config.config.get('fno', {}).get('enable', False)
             multimodal_enabled = config.config.get('multimodal', {}).get('enable', False)
             if gnn_enabled:
                 from model.models.gnn import GNNE2C
                 self.model = GNNE2C(config)
+            elif fno_enabled:
+                from model.models.fno import FNOE2C
+                self.model = FNOE2C(config)
             elif multimodal_enabled:
                 from model.multimodal_approach import MultimodalMSE2C
                 self.model = MultimodalMSE2C(config)

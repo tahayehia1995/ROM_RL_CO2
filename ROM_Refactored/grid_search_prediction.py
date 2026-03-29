@@ -434,12 +434,14 @@ def extract_latent_dim_from_weights(encoder_file: str) -> Optional[int]:
     try:
         state_dict = torch.load(encoder_file, map_location='cpu', weights_only=False)
         
-        if isinstance(state_dict, dict) and ('_multimodal' in state_dict or '_gnn' in state_dict):
+        if isinstance(state_dict, dict) and ('_multimodal' in state_dict or '_gnn' in state_dict or '_fno' in state_dict):
             total = 0
             for branch in ('static_encoder', 'dynamic_encoder'):
                 branch_sd = state_dict.get(branch, {})
                 if 'fc_mean.weight' in branch_sd:
                     total += branch_sd['fc_mean.weight'].shape[0]
+                elif 'fc.weight' in branch_sd:
+                    total += branch_sd['fc.weight'].shape[0]
                 elif 'grid_pool.fc.weight' in branch_sd:
                     total += branch_sd['grid_pool.fc.weight'].shape[0]
                 elif 'pool.proj.weight' in branch_sd:

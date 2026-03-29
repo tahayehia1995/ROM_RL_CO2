@@ -458,6 +458,22 @@ def get_dissipativity_loss(singular_values, margin=0.1):
     return torch.mean(excess ** 2)
 
 
+def get_invertibility_loss(z_original, z_re_encoded):
+    """
+    Invertibility loss for FNO encoder-decoder.
+    Measures ||encode(decode(z)) - z||^2 to enforce that the
+    encode-decode pipeline is approximately invertible.
+
+    Args:
+        z_original: Original latent vectors (B, D).
+        z_re_encoded: Re-encoded latent vectors after decode->encode (B, D).
+
+    Returns:
+        Scalar MSE loss.
+    """
+    return torch.mean((z_re_encoded - z_original) ** 2)
+
+
 def get_reversibility_loss(residual):
     """
     Reversibility loss for IS-FNO transition.

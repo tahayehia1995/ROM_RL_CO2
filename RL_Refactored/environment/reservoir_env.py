@@ -736,7 +736,9 @@ class ReservoirEnvironment(object):
                         idx = min(self._last_case_idx, self.original_spatial_states.shape[0] - 1)
                         self.current_spatial_state = self.original_spatial_states[idx:idx+1]
                         if self._sampling_count <= 2:
-                            model_type = "GNN" if hasattr(self.rom.model, 'graph_manager') else "Multimodal"
+                            model_type = ("GNN" if hasattr(self.rom.model, 'graph_manager')
+                                         else "FNO" if hasattr(self.rom.model, 'fno_encoder')
+                                         else "Multimodal")
                             print(f"🎯 State-based mode: Using original spatial state for {model_type} model")
                     else:
                         raise RuntimeError(
