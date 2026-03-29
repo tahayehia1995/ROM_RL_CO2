@@ -1656,37 +1656,33 @@ class RLConfigurationDashboard:
                     print(f"      ({', '.join(details)})")
     
     def _create_model_display_name(self, filename, model_info):
-        """Create a user-friendly display name for the model"""
-        # For grid search models: e2co_encoder_grid_bs32_ld32_ns2_run0001_bs32_ld32_ns2.h5
-        # Display: Grid Model (bs=32, ld=32, run=1)
-        
-        # For standard models: e2co_encoder_3D_native_nt800_l128_lr1e-04_ep200_steps2_channels2_wells6.h5
-        # Display: Standard Model (ld=128, ep=200, ch=2)
-        
-        if 'grid' in filename.lower():
-            parts = []
-            if 'batch_size' in model_info:
-                parts.append(f"bs={model_info['batch_size']}")
-            if 'latent' in model_info:
-                parts.append(f"ld={model_info['latent']}")
-            if 'run' in model_info:
-                parts.append(f"run={model_info['run']}")
-            if parts:
-                return f"Grid Model ({', '.join(parts)})"
-            else:
-                return "Grid Search Model"
+        """Create a user-friendly display name showing transition type, encoding, and key hyperparameters."""
+        import re as _re
+
+        trn_match = _re.search(r'_trn([A-Z0-9_]+)', filename)
+        transition = trn_match.group(1) if trn_match else 'LINEAR'
+
+        if model_info.get('gnn') or '_gnn' in filename:
+            encoding = 'GNN'
+        elif model_info.get('multimodal') or '_mm' in filename:
+            encoding = 'MM'
         else:
-            parts = []
-            if 'latent' in model_info:
-                parts.append(f"ld={model_info['latent']}")
-            if 'epoch' in model_info:
-                parts.append(f"ep={model_info['epoch']}")
-            if 'channels' in model_info:
-                parts.append(f"ch={model_info['channels']}")
-            if parts:
-                return f"Standard Model ({', '.join(parts)})"
-            else:
-                return os.path.basename(filename).replace('_encoder', '').replace('.h5', '')
+            encoding = 'Std'
+
+        parts = [transition, encoding]
+        ld = model_info.get('latent_dim', model_info.get('latent'))
+        if ld is not None:
+            parts.append(f"ld={ld}")
+        ns = model_info.get('nsteps', model_info.get('steps'))
+        if ns is not None:
+            parts.append(f"ns={ns}")
+        if 'batch_size' in model_info:
+            parts.append(f"bs={model_info['batch_size']}")
+        ch = model_info.get('channels')
+        if ch is not None:
+            parts.append(f"ch={ch}")
+
+        return ' | '.join(parts)
     
     def _parse_model_filename(self, filename):
         """Parse model filename to extract configuration info"""
@@ -2055,28 +2051,8 @@ class RLConfigurationDashboard:
             # Create user-friendly options with detailed info
             rom_options = []
             for i, m in enumerate(self.config['rom_models']):
-                info = m.get('info', {})
                 display_name = m.get('name', f"Model {i+1}")
-                
-                # Add additional details if available
-                details = []
-                if 'batch_size' in info:
-                    details.append(f"bs={info['batch_size']}")
-                if 'latent' in info:
-                    details.append(f"ld={info['latent']}")
-                if 'channels' in info:
-                    details.append(f"ch={info['channels']}")
-                if 'run' in info:
-                    details.append(f"run={info['run']}")
-                if 'epoch' in info:
-                    details.append(f"ep={info['epoch']}")
-                
-                if details:
-                    full_name = f"{display_name} ({', '.join(details)})"
-                else:
-                    full_name = display_name
-                
-                rom_options.append((full_name, i))
+                rom_options.append((display_name, i))
             
             self.rom_selector = widgets.Dropdown(
                 options=rom_options,

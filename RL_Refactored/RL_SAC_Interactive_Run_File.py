@@ -55,7 +55,7 @@ else:
 
 #%%
 # Option B: Load a specific file (uncomment and set path)
-loaded_orchestrator = EnhancedTrainingOrchestrator.load_results('RL_Refactored/training_results/rl_training_results_20260310_024806.pkl')
+loaded_orchestrator = EnhancedTrainingOrchestrator.load_results('RL_Refactored/training_results/rl_training_results_SAC_MAMBA2_MM_ld_128_ns_2_bs_16_ch_4_20260329_130202.pkl')
 config = Config('config.yaml')
 viz_dashboard = launch_interactive_scientific_analysis(training_orchestrator=loaded_orchestrator, config=config)
 

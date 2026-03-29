@@ -211,7 +211,7 @@ class RLTrainingDashboard:
         Returns:
             mean_eval_npv: Mean NPV across evaluated cases
         """
-        max_steps = self.config.rl_model['training']['max_steps_per_episode']
+        max_steps = self.config.config.get('rl_model', {}).get('training', {}).get('max_steps_per_episode', 100)
         total_available = z0_options.shape[0]
         num_cases = min(num_cases, total_available)
         
@@ -289,15 +289,18 @@ class RLTrainingDashboard:
                 # Update config with dashboard values
                 update_config_with_dashboard(self.config, self.rl_config)
                 
+                # Safe access to rl_model section (may not exist in ROM-only configs)
+                rl_model_cfg = self.config.config.get('rl_model', {})
+                
                 # Set WandB run name to include ROM model info
                 rom_name = 'unknown'
-                prediction_mode = self.rl_config.get('prediction_mode', 'state_based')
+                prediction_mode = self.config.config.get('rl_model', {}).get('environment', {}).get('prediction_mode', 'state_based')
                 if hasattr(self, 'rl_config') and 'selected_rom' in (get_rl_config() or {}):
                     rl_cfg = get_rl_config()
                     rom_name = rl_cfg['selected_rom'].get('name', 'unknown')
                 elif 'runtime' in self.config.config and 'wandb' in self.config.config['runtime']:
                     pass
-                algo_type = self.config.rl_model.get('algorithm', {}).get('type', 'SAC')
+                algo_type = rl_model_cfg.get('algorithm', {}).get('type', 'SAC')
                 wandb_cfg = self.config.config.setdefault('runtime', {}).setdefault('wandb', {})
                 wandb_cfg['project'] = 'RL-SAC'
                 if not wandb_cfg.get('name'):
@@ -330,10 +333,15 @@ class RLTrainingDashboard:
                 self.wandb_logger.watch_model(my_rom)
                 
                 # Create RL agent (algorithm selected via config)
-                algo_type = self.config.rl_model.get('algorithm', {}).get('type', 'SAC')
+                algo_type = rl_model_cfg.get('algorithm', {}).get('type', 'SAC')
                 print(f"   Creating {algo_type} agent...")
                 self.agent = create_rl_agent(self.config, self.rl_config, rom_model=my_rom)
                 self._is_ppo = algo_type.upper() == 'PPO'
+
+                import re as _re
+                self._rom_model_tag = _re.sub(r'[|<>:"/\\?*\s]+', '_', rom_name).strip('_')
+                self._algo_type = algo_type
+                self._prediction_mode = prediction_mode
                 
                 # Create environment (pass spatial states for multimodal models)
                 print("   🌍 Creating environment...")
@@ -347,19 +355,20 @@ class RLTrainingDashboard:
                 
                 # Set global seeds for reproducibility
                 import random as _random
-                seeds = self.config.rl_model['training']['seeds']
-                torch.manual_seed(seeds['torch'])
-                np.random.seed(seeds['numpy'])
-                _random.seed(seeds['torch'])
+                seeds = rl_model_cfg.get('training', {}).get('seeds', {'torch': 42, 'numpy': 42, 'replay_memory': 42})
+                torch.manual_seed(seeds.get('torch', 42))
+                np.random.seed(seeds.get('numpy', 42))
+                _random.seed(seeds.get('torch', 42))
                 if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seeds['torch'])
-                print(f"   🎲 Seeds set: torch={seeds['torch']}, numpy={seeds['numpy']}")
+                    torch.cuda.manual_seed_all(seeds.get('torch', 42))
+                print(f"   🎲 Seeds set: torch={seeds.get('torch', 42)}, numpy={seeds.get('numpy', 42)}")
 
                 # Create replay memory
                 print("   💾 Creating replay memory...")
-                batch_size = self.config.rl_model['replay_memory']['batch_size']
-                capacity = self.config.rl_model['replay_memory']['capacity']
-                seed = self.config.rl_model['training']['seeds']['replay_memory']
+                replay_cfg = rl_model_cfg.get('replay_memory', {})
+                batch_size = replay_cfg.get('batch_size', 256)
+                capacity = replay_cfg.get('capacity', 1000000)
+                seed = seeds.get('replay_memory', 42)
                 self.memory = ReplayMemory(capacity, seed)
                 
                 # Create training orchestrator
@@ -415,11 +424,12 @@ class RLTrainingDashboard:
             print("🚀 Starting RL training...")
             
             # Training parameters
-            training_config = self.config.rl_model['training']
-            max_episodes = training_config['max_episodes']
-            max_steps = training_config['max_steps_per_episode']
-            batch_size = self.config.rl_model['replay_memory']['batch_size']
-            updates_per_step = training_config['updates_per_step']
+            rl_model_cfg = self.config.config.get('rl_model', {})
+            training_config = rl_model_cfg.get('training', {})
+            max_episodes = training_config.get('max_episodes', 500)
+            max_steps = training_config.get('max_steps_per_episode', 100)
+            batch_size = rl_model_cfg.get('replay_memory', {}).get('batch_size', 256)
+            updates_per_step = training_config.get('updates_per_step', 1)
             save_interval = 100
             exploration_steps = training_config.get('exploration_steps', 0)
             print_interval = training_config.get('print_interval', 10)
@@ -635,7 +645,8 @@ class RLTrainingDashboard:
                             # Save checkpoint only if evaluation NPV improved
                             if mean_eval_npv > self.best_eval_reward:
                                 self.best_eval_reward = mean_eval_npv
-                                self.agent.save_checkpoint("best_model", suffix=f"ep{episode}")
+                                _rom_tag = getattr(self, '_rom_model_tag', 'unknown')
+                                self.agent.save_checkpoint(f"best_{_rom_tag}", suffix=f"ep{episode}")
                                 print(
                                     f"   💾 New best model saved! "
                                     f"Eval NPV: {self.best_eval_reward:.4f} "
@@ -645,12 +656,14 @@ class RLTrainingDashboard:
                         # --- Default: Training-reward-based checkpoint ---
                         if final_reward > self.best_reward:
                             self.best_reward = final_reward
-                            self.agent.save_checkpoint("best_model", suffix=f"ep{episode}")
+                            _rom_tag = getattr(self, '_rom_model_tag', 'unknown')
+                            self.agent.save_checkpoint(f"best_{_rom_tag}", suffix=f"ep{episode}")
                             print(f"   💾 New best model saved! Reward: {self.best_reward:.2f}")
                     
                     # Periodic save (always, regardless of checkpoint strategy)
                     if (episode + 1) % save_interval == 0:
-                        self.agent.save_checkpoint("periodic", suffix=f"ep{episode+1}")
+                        _rom_tag = getattr(self, '_rom_model_tag', 'unknown')
+                        self.agent.save_checkpoint(f"periodic_{_rom_tag}", suffix=f"ep{episode+1}")
                         print(f"   💾 Checkpoint saved at episode {episode+1}")
                 
                 # Training complete
@@ -672,7 +685,11 @@ class RLTrainingDashboard:
                 
                 # Auto-save training results for later visualization
                 try:
-                    self.last_saved_results = self.training_orchestrator.save_results()
+                    self.last_saved_results = self.training_orchestrator.save_results(
+                        rom_name=getattr(self, '_rom_model_tag', None),
+                        algorithm_type=getattr(self, '_algo_type', None),
+                        prediction_mode=getattr(self, '_prediction_mode', None),
+                    )
                 except Exception as _save_err:
                     print(f"⚠️ Could not auto-save training results: {_save_err}")
 

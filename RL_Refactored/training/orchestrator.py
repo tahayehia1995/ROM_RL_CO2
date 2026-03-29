@@ -907,7 +907,7 @@ class EnhancedTrainingOrchestrator:
     # Save / Load training results to disk
     # ------------------------------------------------------------------
 
-    def save_results(self, save_dir=None):
+    def save_results(self, save_dir=None, rom_name=None, algorithm_type=None, prediction_mode=None):
         """Save training results to disk for later visualization.
 
         Saves stored episodes, best episode data, reward history, and
@@ -916,10 +916,15 @@ class EnhancedTrainingOrchestrator:
 
         Args:
             save_dir: Directory to save into (default: RL_Refactored/training_results)
+            rom_name: Display name of the ROM model used (encoded in filename).
+            algorithm_type: RL algorithm name, e.g. 'SAC' (encoded in filename).
+            prediction_mode: 'state_based' or 'latent' (encoded in filename).
 
         Returns:
             Path to the saved file.
         """
+        import re as _re
+
         if save_dir is None:
             save_dir = _RL_DIR / 'training_results'
         save_dir = Path(save_dir)
@@ -944,11 +949,27 @@ class EnhancedTrainingOrchestrator:
             'variation_stats': _tensor_to_list(self.variation_stats),
             'episode_rewards': _tensor_to_list(
                 getattr(self, '_episode_rewards_history', [])),
+            'rom_name': rom_name,
+            'algorithm_type': algorithm_type,
+            'prediction_mode': prediction_mode,
         }
 
         from datetime import datetime
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filepath = save_dir / f'rl_training_results_{timestamp}.pkl'
+
+        parts = ['rl_training_results']
+        if algorithm_type:
+            parts.append(algorithm_type.upper())
+        if prediction_mode:
+            mode_tag = 'state' if 'state' in prediction_mode.lower() else 'latent'
+            parts.append(mode_tag)
+        if rom_name:
+            safe_name = _re.sub(r'[^\w\-]', '_', rom_name)
+            parts.append(safe_name)
+        parts.append(timestamp)
+        filename = '_'.join(parts) + '.pkl'
+
+        filepath = save_dir / filename
         with open(filepath, 'wb') as f:
             pickle.dump(payload, f)
 
@@ -973,13 +994,15 @@ class EnhancedTrainingOrchestrator:
         """
         filepath = Path(filepath)
         if not filepath.exists():
-            alt = _RL_DIR / filepath.name
-            if alt.exists():
-                filepath = alt
-            else:
-                alt2 = _RL_DIR / 'training_results' / filepath.name
-                if alt2.exists():
-                    filepath = alt2
+            candidates = [
+                _RL_DIR / filepath.name,
+                _RL_DIR / 'training_results' / filepath.name,
+                _RL_DIR.parent / filepath,
+            ]
+            for alt in candidates:
+                if alt.exists():
+                    filepath = alt
+                    break
         with open(filepath, 'rb') as f:
             payload = pickle.load(f)
 

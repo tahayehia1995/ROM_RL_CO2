@@ -249,7 +249,7 @@ class MultimodalMSE2C(nn.Module):
             self.decoder = Decoder(dec_proxy)
 
         # --- conditioned transition (operates on z_dynamic, conditioned on z_static) ---
-        transition_type = self.config['transition'].get('type', 'linear')
+        transition_type = self.config['transition'].get('type', 'linear').lower()
         _conditioned_map = {
             'clru': ('model.models.clru_transition', 'ConditionedCLRUTransition'),
             's4d': ('model.models.s4d_transition', 'ConditionedS4DTransition'),

@@ -991,37 +991,57 @@ class OptimizerConfigDashboard:
             except:
                 pass
         
-        # Detect multimodal flag (mmT = enabled, mmF = disabled)
-        if '_mmT' in filename:
+        # Detect multimodal flag
+        if '_mmT' in filename or '_mm_' in filename or filename.endswith('_mm.h5') or re.search(r'_mm[_.]', filename):
             info['multimodal'] = True
         elif '_mmF' in filename:
             info['multimodal'] = False
+        # Also check for bare _mm token (grid search format)
+        if not info.get('multimodal') and '_mm' in filename and '_mmF' not in filename:
+            info['multimodal'] = True
+
+        # Detect GNN flag
+        if '_gnnT' in filename or '_gnn_' in filename or filename.endswith('_gnn.h5') or re.search(r'_gnn[_.]', filename):
+            info['gnn'] = True
+        elif '_gnnF' in filename:
+            info['gnn'] = False
+        if not info.get('gnn') and '_gnn' in filename and '_gnnF' not in filename:
+            info['gnn'] = True
         
         # Detect normalization type
         norm_match = re.search(r'_norm(ba|gd)', filename)
         if norm_match:
             info['norm_type'] = 'batchnorm' if norm_match.group(1) == 'ba' else 'gdn'
         
-        # Detect transition type (trnCLRU, trnFNO, etc.)
-        trn_match = re.search(r'_trn([A-Z]+)', filename)
+        # Detect transition type (trnCLRU, trnMAMBA2, etc.)
+        trn_match = re.search(r'_trn([A-Z0-9_]+)', filename)
         if trn_match:
             info['transition_type'] = trn_match.group(1).lower()
         
         return info
     
     def _create_model_display_name(self, filename: str, info: Dict) -> str:
-        """Create display name for model."""
-        parts = []
-        if 'batch_size' in info:
-            parts.append(f"bs={info['batch_size']}")
+        """Create display name showing transition type, encoding, and key hyperparameters."""
+        transition = info.get('transition_type', 'LINEAR')
+
+        if info.get('gnn'):
+            encoding = 'GNN'
+        elif info.get('multimodal'):
+            encoding = 'MM'
+        else:
+            encoding = 'Std'
+
+        parts = [transition, encoding]
         if 'latent_dim' in info:
             parts.append(f"ld={info['latent_dim']}")
-        if 'run' in info:
-            parts.append(f"run={info['run']}")
-        
-        if parts:
-            return f"Model ({', '.join(parts)})"
-        return filename
+        if 'nsteps' in info:
+            parts.append(f"ns={info['nsteps']}")
+        if 'batch_size' in info:
+            parts.append(f"bs={info['batch_size']}")
+        if 'channels' in info:
+            parts.append(f"ch={info['channels']}")
+
+        return ' | '.join(parts)
     
     def _scan_available_states(self):
         """Scan for available state data files."""

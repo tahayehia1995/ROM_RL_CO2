@@ -423,14 +423,25 @@ class TestingDashboard:
                 self.available_models = self._scan_available_models(model_dir)
                 
                 if self.available_models:
-                    # Create dropdown options
+                    # Create dropdown options with rich structured labels
                     options = []
                     for model_set in self.available_models:
+                        run_id = model_set['run_id']
                         n_channels_str = f", ch={model_set['n_channels']}" if model_set.get('n_channels') is not None else ""
-                        label = (f"Run {model_set['run_id']} | "
-                                f"bs={model_set['batch_size']}, "
-                                f"ld={model_set['latent_dim']}, "
-                                f"ns={model_set['n_steps']}{n_channels_str}")
+
+                        trn_match = re.search(r'_trn([A-Z0-9_]+)', run_id)
+                        transition = trn_match.group(1) if trn_match else 'LINEAR'
+
+                        if '_gnn' in run_id:
+                            encoding = 'GNN'
+                        elif '_mm' in run_id:
+                            encoding = 'Multimodal'
+                        else:
+                            encoding = 'Standard'
+
+                        label = (f"{transition} | {encoding} | "
+                                f"ld={model_set['latent_dim']}, ns={model_set['n_steps']}, "
+                                f"bs={model_set['batch_size']}{n_channels_str}")
                         options.append((label, model_set))
                     
                     self.model_selection.options = options
@@ -439,10 +450,20 @@ class TestingDashboard:
                     
                     print(f"✅ Found {len(self.available_models)} model set(s)")
                     for model_set in self.available_models:
+                        run_id = model_set['run_id']
                         transition_status = "✓" if model_set.get('transition') else "⚠️ (missing)"
                         n_channels_str = f", ch={model_set['n_channels']}" if model_set.get('n_channels') is not None else ""
-                        print(f"   Run {model_set['run_id']}: bs={model_set['batch_size']}, "
-                              f"ld={model_set['latent_dim']}, ns={model_set['n_steps']}{n_channels_str}, transition={transition_status}")
+                        trn_match = re.search(r'_trn([A-Z0-9_]+)', run_id)
+                        transition = trn_match.group(1) if trn_match else 'LINEAR'
+                        if '_gnn' in run_id:
+                            enc = 'GNN'
+                        elif '_mm' in run_id:
+                            enc = 'MM'
+                        else:
+                            enc = 'Std'
+                        print(f"   {transition} | {enc} | ld={model_set['latent_dim']}, "
+                              f"ns={model_set['n_steps']}, bs={model_set['batch_size']}{n_channels_str}, "
+                              f"transition={transition_status}")
                 else:
                     self.model_selection.options = [("No models found", None)]
                     print(f"⚠️ No model sets found in {model_dir}")

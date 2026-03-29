@@ -269,7 +269,7 @@ class GNNE2C(nn.Module):
                 except Exception:
                     pass
 
-        transition_type = config['transition'].get('type', 'linear')
+        transition_type = config['transition'].get('type', 'linear').lower()
         _conditioned_map = {
             'clru': ('model.models.clru_transition', 'ConditionedCLRUTransition'),
             's4d': ('model.models.s4d_transition', 'ConditionedS4DTransition'),
