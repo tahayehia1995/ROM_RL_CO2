@@ -36,6 +36,7 @@ class FNODecoder(nn.Module):
         modes = tuple(dec_cfg.get('n_modes', enc_cfg.get('n_modes', [12, 8, 10])))
         activation = enc_cfg.get('activation', 'gelu')
         alpha = enc_cfg.get('residual_alpha', 0.1)
+        norm_type = dec_cfg.get('norm_type', enc_cfg.get('norm_type', 'batchnorm'))
 
         self.trunc_modes = tuple(trunc_cfg.get('spatial_modes', [4, 4, 4]))
         self.proj_channels = trunc_cfg.get('channels', 16)
@@ -47,14 +48,17 @@ class FNODecoder(nn.Module):
             nn.GELU(),
         )
 
-        self.unproject = nn.Sequential(
-            nn.Conv3d(self.proj_channels, self.width, kernel_size=1),
-            nn.GELU(),
-        )
+        unproject_layers = [nn.Conv3d(self.proj_channels, self.width, kernel_size=1)]
+        if norm_type == 'batchnorm':
+            unproject_layers.append(nn.BatchNorm3d(self.width))
+        elif norm_type == 'instancenorm':
+            unproject_layers.append(nn.InstanceNorm3d(self.width, affine=True))
+        unproject_layers.append(nn.GELU())
+        self.unproject = nn.Sequential(*unproject_layers)
 
         self.spectral_blocks = nn.ModuleList([
             InvertibleSpectralBlock(self.width, modes, alpha=alpha,
-                                   activation=activation)
+                                   activation=activation, norm=norm_type)
             for _ in range(n_layers)
         ])
 

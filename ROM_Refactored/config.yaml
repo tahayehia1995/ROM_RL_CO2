@@ -44,7 +44,7 @@ model:
   sigma: 0.0
   enable_vae: false
 multimodal:
-  enable: true
+  enable: false
   static_latent_dim: 32
   dynamic_latent_dim: 96
   static_channels:
@@ -74,7 +74,7 @@ gnn:
   pooling: attention
   mask_file_path: sr3_batch_output/inactive_cell_locations.h5
 fno:
-  enable: false
+  enable: true
   encoder:
     width: 32
     n_layers: 4
@@ -84,6 +84,7 @@ fno:
     - 10
     activation: gelu
     residual_alpha: 0.1
+    norm_type: batchnorm
   decoder:
     width: 32
     n_layers: 4
@@ -91,6 +92,7 @@ fno:
     - 12
     - 8
     - 10
+    norm_type: batchnorm
   latent_truncation:
     spatial_modes:
     - 4
@@ -475,7 +477,7 @@ loss:
   lambda_energy_loss: 0.1
   enable_dissipativity_loss: true
   lambda_dissipativity_loss: 0.01
-  enable_invertibility_loss: false
+  enable_invertibility_loss: true
   lambda_invertibility_loss: 0.1
   enable_reversibility_loss: true
   lambda_reversibility_loss: 0.1

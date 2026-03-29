@@ -69,11 +69,19 @@ class InvertibleSpectralBlock(nn.Module):
     """
 
     def __init__(self, channels: int, modes: tuple[int, int, int],
-                 alpha: float = 0.1, activation: str = 'gelu'):
+                 alpha: float = 0.1, activation: str = 'gelu',
+                 norm: str = 'batchnorm'):
         super().__init__()
         self.alpha = alpha
         self.spectral_conv = SpectralConv3d(channels, channels, modes)
         self.bypass = nn.Conv3d(channels, channels, kernel_size=1)
+
+        if norm == 'batchnorm':
+            self.norm_layer = nn.BatchNorm3d(channels)
+        elif norm == 'instancenorm':
+            self.norm_layer = nn.InstanceNorm3d(channels, affine=True)
+        else:
+            self.norm_layer = None
 
         act_map = {'gelu': nn.GELU, 'relu': nn.ReLU, 'silu': nn.SiLU}
         self.act = act_map.get(activation, nn.GELU)()
@@ -82,7 +90,10 @@ class InvertibleSpectralBlock(nn.Module):
         nn.init.orthogonal_(self.bypass.weight, gain=0.1)
 
     def _residual(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.spectral_conv(x) + self.bypass(x))
+        h = self.spectral_conv(x) + self.bypass(x)
+        if self.norm_layer is not None:
+            h = self.norm_layer(h)
+        return self.act(h)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.alpha * self._residual(x)

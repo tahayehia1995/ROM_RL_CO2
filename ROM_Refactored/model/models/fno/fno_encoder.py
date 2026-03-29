@@ -35,18 +35,22 @@ class FNOEncoder(nn.Module):
         modes = tuple(enc_cfg.get('n_modes', [12, 8, 10]))
         activation = enc_cfg.get('activation', 'gelu')
         alpha = enc_cfg.get('residual_alpha', 0.1)
+        norm_type = enc_cfg.get('norm_type', 'batchnorm')
 
         self.trunc_modes = tuple(trunc_cfg.get('spatial_modes', [4, 4, 4]))
         self.proj_channels = trunc_cfg.get('channels', 16)
 
-        self.lifting = nn.Sequential(
-            nn.Conv3d(in_channels, self.width, kernel_size=1),
-            nn.GELU(),
-        )
+        lifting_layers = [nn.Conv3d(in_channels, self.width, kernel_size=1)]
+        if norm_type == 'batchnorm':
+            lifting_layers.append(nn.BatchNorm3d(self.width))
+        elif norm_type == 'instancenorm':
+            lifting_layers.append(nn.InstanceNorm3d(self.width, affine=True))
+        lifting_layers.append(nn.GELU())
+        self.lifting = nn.Sequential(*lifting_layers)
 
         self.spectral_blocks = nn.ModuleList([
             InvertibleSpectralBlock(self.width, modes, alpha=alpha,
-                                   activation=activation)
+                                   activation=activation, norm=norm_type)
             for _ in range(n_layers)
         ])
 

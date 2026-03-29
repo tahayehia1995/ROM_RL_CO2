@@ -86,7 +86,8 @@ HYPERPARAMETER_GRID = {
     'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
     # FNO (Fourier Neural Operator encoder/decoder) - invertible spectral convolution, requires n_channels=4
-    'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
+    'enable_fno': [True],                # Replace CNN encoder/decoder with FNO (spectral-based)
+    'fno_norm_type': ['batchnorm'],       # FNO normalization: 'batchnorm' (default), 'instancenorm', 'none'
     
     # Transition model type
     'transition_type': ['mamba2'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
@@ -1000,6 +1001,13 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
         if 'loss' not in config.config:
             config.config['loss'] = {}
         config.config['loss']['enable_invertibility_loss'] = True
+        fno_norm = hyperparams.get('fno_norm_type', 'batchnorm')
+        if 'encoder' not in config.config['fno']:
+            config.config['fno']['encoder'] = {}
+        if 'decoder' not in config.config['fno']:
+            config.config['fno']['decoder'] = {}
+        config.config['fno']['encoder']['norm_type'] = fno_norm
+        config.config['fno']['decoder']['norm_type'] = fno_norm
     else:
         if 'fno' not in config.config:
             config.config['fno'] = {}
