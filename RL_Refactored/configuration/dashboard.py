@@ -2966,7 +2966,7 @@ Where:
                     config_updated = True
                 # Propagate to RL environment for multi-step action chunking
                 if nsteps:
-                    config.rl_model['environment']['rom_nsteps'] = int(nsteps)
+                    self.config['rom_nsteps'] = int(nsteps)
                     print(f"      ✅ RL action chunking set to rom_nsteps={nsteps} (each RL step = {nsteps} ROM transitions)")
             
             # Update channels if found — also propagate to input_shape, encoder, decoder
@@ -3949,6 +3949,11 @@ def update_config_with_dashboard(config, rl_config):
         # Environment prediction mode
         if 'prediction_mode' in rl_hyperparams:
             config.rl_model['environment']['prediction_mode'] = rl_hyperparams['prediction_mode']
+    
+    # Propagate rom_nsteps for multi-step action chunking
+    rom_nsteps = rl_config.get('rom_nsteps', 1)
+    if rom_nsteps and rom_nsteps > 0:
+        config.rl_model['environment']['rom_nsteps'] = int(rom_nsteps)
         
         if 'batch_size' in rl_hyperparams:
             config.rl_model['replay_memory']['batch_size'] = rl_hyperparams['batch_size']
