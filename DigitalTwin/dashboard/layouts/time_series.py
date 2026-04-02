@@ -18,11 +18,11 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 
 
-_DARK_LAYOUT = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(22,33,62,0.8)",
-    font=dict(color="#e0e0e0", size=10),
+_LIGHT_LAYOUT = dict(
+    template="plotly_white",
+    paper_bgcolor="rgba(255,255,255,0)",
+    plot_bgcolor="rgba(248,249,250,0.8)",
+    font=dict(color="#2c3e50", size=10),
     margin=dict(l=50, r=15, t=30, b=30),
     height=200,
 )
@@ -30,7 +30,7 @@ _DARK_LAYOUT = dict(
 
 def _empty_fig(title: str) -> go.Figure:
     fig = go.Figure()
-    fig.update_layout(title=dict(text=title, font=dict(size=11)), **_DARK_LAYOUT)
+    fig.update_layout(title=dict(text=title, font=dict(size=11)), **_LIGHT_LAYOUT)
     return fig
 
 
@@ -52,13 +52,13 @@ def build_time_series_panel() -> dbc.Card:
         dbc.CardHeader(html.H4(
             "Well Observations & KPIs",
             className="mb-0",
-            style={"color": "#e94560", "fontSize": "1rem"},
+            style={"color": "#c0392b", "fontSize": "1rem"},
         )),
         dbc.CardBody([
 
             # --- Row 1: Injector BHP (3 wells) ---
             html.Div("Injector BHP (psi)", style={
-                "color": "#53d8fb", "fontSize": "0.8rem", "fontWeight": "600",
+                "color": "#2980b9", "fontSize": "0.8rem", "fontWeight": "600",
                 "marginBottom": "4px", "marginTop": "4px",
             }),
             dbc.Row([
@@ -69,7 +69,7 @@ def build_time_series_panel() -> dbc.Card:
 
             # --- Row 2: Gas Production (3 wells) ---
             html.Div("Gas Production (ft\u00b3/day)", style={
-                "color": "#53d8fb", "fontSize": "0.8rem", "fontWeight": "600",
+                "color": "#2980b9", "fontSize": "0.8rem", "fontWeight": "600",
                 "marginBottom": "4px", "marginTop": "16px",
             }),
             dbc.Row([
@@ -80,7 +80,7 @@ def build_time_series_panel() -> dbc.Card:
 
             # --- Row 3: Water Production (3 wells) ---
             html.Div("Water Production (BBL/day)", style={
-                "color": "#53d8fb", "fontSize": "0.8rem", "fontWeight": "600",
+                "color": "#2980b9", "fontSize": "0.8rem", "fontWeight": "600",
                 "marginBottom": "4px", "marginTop": "16px",
             }),
             dbc.Row([
@@ -91,7 +91,7 @@ def build_time_series_panel() -> dbc.Card:
 
             # --- Row 4: Cumulative NPV (full width) ---
             html.Div("Economics", style={
-                "color": "#53d8fb", "fontSize": "0.8rem", "fontWeight": "600",
+                "color": "#2980b9", "fontSize": "0.8rem", "fontWeight": "600",
                 "marginBottom": "4px", "marginTop": "16px",
             }),
             dcc.Graph(
@@ -102,6 +102,6 @@ def build_time_series_panel() -> dbc.Card:
             ),
         ], style={"padding": "8px"}),
     ], style={
-        "background": "#16213e", "border": "1px solid #1a1a40",
+        "background": "#ffffff", "border": "1px solid #dcdde1",
         "height": "100%", "overflowY": "auto",
     })

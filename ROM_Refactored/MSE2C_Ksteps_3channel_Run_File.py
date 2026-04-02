@@ -1,11 +1,11 @@
 """
 Main Run File for E2C Model
 ==========================
-This file orchestrates the three main parts of the ROM project:
+This file orchestrates the two main parts of the ROM project:
 1. Data Preprocessing Dashboard
-2. Model Training Dashboard  
-3. Testing & Visualization Dashboard
+2. Testing & Visualization Dashboard
 
+Model training is handled separately via grid_search_training.py.
 Each part is independent with its own configuration and functionality.
 """
 #%%
@@ -38,18 +38,7 @@ preprocessing_dashboard = create_data_preprocessing_dashboard()
 
 #%%
 # ============================================================================
-# STEP 2: MODEL TRAINING DASHBOARD
-# ============================================================================
-# Import and create training dashboard
-from model.training import create_training_dashboard
-
-# Create and display the training dashboard
-training_dashboard = create_training_dashboard(config_path='config.yaml')
-
-
-#%%
-# ============================================================================
-# STEP 3: TESTING & VISUALIZATION DASHBOARD
+# STEP 2: TESTING & VISUALIZATION DASHBOARD
 # ============================================================================
 # Import and create testing dashboard
 import os

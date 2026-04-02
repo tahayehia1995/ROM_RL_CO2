@@ -838,8 +838,7 @@ def generate_z0_from_dashboard(rl_config, rom_model, device):
     with torch.no_grad():
         try:
             if hasattr(rom_model.model, 'encode_initial'):
-                # GNN: uses internal graph structure for encoding
-                print(f"   Encoding via GNN encode_initial (batch_size={state_t_seq.shape[0]})")
+                print(f"   Encoding via {model_class}.encode_initial (batch_size={state_t_seq.shape[0]})")
                 z0_options = rom_model.model.encode_initial(state_t_seq)
             elif hasattr(rom_model.model, 'static_encoder'):
                 # Multimodal: encode both branches and concatenate
@@ -2582,7 +2581,7 @@ Where:
         
         self.rl_hyperparams['max_episodes'] = widgets.IntSlider(
             value=self.default_rl_hyperparams['training']['max_episodes'],
-            min=100, max=5000, step=100, description='Max Episodes:', style=_sw, layout=_lw
+            min=100, max=1000000, step=100, description='Max Episodes:', style=_sw, layout=_lw
         )
         hyperparam_widgets.append(self.rl_hyperparams['max_episodes'])
         

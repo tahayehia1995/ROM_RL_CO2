@@ -10,16 +10,16 @@ import plotly.graph_objects as go
 
 
 def _empty_figure(height: int = 500) -> go.Figure:
-    """Dark placeholder figure with no geometry."""
+    """Light placeholder figure with no geometry."""
     fig = go.Figure()
     fig.update_layout(
         scene=dict(
             xaxis=dict(visible=False),
             yaxis=dict(visible=False),
             zaxis=dict(visible=False),
-            bgcolor="rgb(10,10,26)",
+            bgcolor="rgb(248,249,250)",
         ),
-        paper_bgcolor="rgb(10,10,26)",
+        paper_bgcolor="rgb(248,249,250)",
         margin=dict(l=0, r=0, t=0, b=0),
         height=height,
     )
@@ -41,7 +41,6 @@ def build_vtk_views() -> html.Div:
                     ],
                     value="pressure",
                     clearable=False,
-                    style={"background": "#16213e", "color": "#e0e0e0"},
                 ),
             ], width=3),
             dbc.Col([
@@ -50,13 +49,13 @@ def build_vtk_views() -> html.Div:
                     options=[],
                     value="perspective_3d",
                     clearable=False,
-                    style={"background": "#16213e", "color": "#e0e0e0"},
                 ),
             ], width=3),
             dbc.Col([
                 html.Div(id="step-display", children="Step: 0 / 30",
-                         style={"color": "#53d8fb", "fontSize": "1.1rem",
-                                "textAlign": "right", "paddingTop": "6px"}),
+                         style={"color": "#2c3e50", "fontSize": "1.1rem",
+                                "textAlign": "right", "paddingTop": "6px",
+                                "fontWeight": "600"}),
             ], width=6),
         ], className="mb-2"),
 
@@ -68,14 +67,14 @@ def build_vtk_views() -> html.Div:
                 config={"displayModeBar": True, "scrollZoom": True},
                 style={"width": "100%", "height": "700px"},
             ),
-        ], style={"background": "#0a0a1a", "border": "1px solid #0f3460",
+        ], style={"background": "#f8f9fa", "border": "1px solid #dcdde1",
                   "marginBottom": "8px"}),
 
         # --- Slice views ---
         dbc.Row([
             dbc.Col([
-                html.Div("I-Slice", style={"color": "#8899aa", "fontSize": "0.75rem",
-                                           "textAlign": "center"}),
+                html.Div("I-Slice", style={"color": "#555555", "fontSize": "0.75rem",
+                                           "textAlign": "center", "fontWeight": "600"}),
                 dcc.Slider(id="slider-slice-i", min=0, max=33, step=1, value=17,
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(
@@ -86,8 +85,8 @@ def build_vtk_views() -> html.Div:
                 ),
             ], width=4),
             dbc.Col([
-                html.Div("J-Slice", style={"color": "#8899aa", "fontSize": "0.75rem",
-                                           "textAlign": "center"}),
+                html.Div("J-Slice", style={"color": "#555555", "fontSize": "0.75rem",
+                                           "textAlign": "center", "fontWeight": "600"}),
                 dcc.Slider(id="slider-slice-j", min=0, max=15, step=1, value=8,
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(
@@ -98,8 +97,8 @@ def build_vtk_views() -> html.Div:
                 ),
             ], width=4),
             dbc.Col([
-                html.Div("K-Slice", style={"color": "#8899aa", "fontSize": "0.75rem",
-                                           "textAlign": "center"}),
+                html.Div("K-Slice", style={"color": "#555555", "fontSize": "0.75rem",
+                                           "textAlign": "center", "fontWeight": "600"}),
                 dcc.Slider(id="slider-slice-k", min=0, max=24, step=1, value=12,
                            marks=None, tooltip={"placement": "bottom"}),
                 dcc.Graph(

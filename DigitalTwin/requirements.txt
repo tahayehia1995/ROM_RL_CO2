@@ -19,3 +19,8 @@ plotly>=5.18.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.5.0
+
+# AI Chat Assistant (LLM providers -- install whichever you use)
+openai>=1.0.0
+google-generativeai>=0.8.0
+anthropic>=0.40.0

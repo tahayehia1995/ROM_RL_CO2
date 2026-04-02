@@ -10,6 +10,7 @@ import dash_bootstrap_components as dbc
 from .layouts.control_panel import build_control_panel
 from .layouts.vtk_views import build_vtk_views
 from .layouts.time_series import build_time_series_panel
+from .layouts.chat_panel import build_chat_panel
 
 
 def create_dash_app(engine, dt_cfg: dict) -> Dash:
@@ -22,8 +23,7 @@ def create_dash_app(engine, dt_cfg: dict) -> Dash:
     Returns:
         Configured ``Dash`` app ready for ``app.run()``.
     """
-    theme = dt_cfg.get("dashboard", {}).get("theme", "darkly")
-    theme_url = getattr(dbc.themes, theme.upper(), dbc.themes.DARKLY)
+    theme_url = dbc.themes.FLATLY
 
     app = Dash(
         __name__,
@@ -41,20 +41,20 @@ def create_dash_app(engine, dt_cfg: dict) -> Dash:
         # ---- Header ----
         dbc.Row([
             dbc.Col([
-                html.H1("Reservoir Digital Twin", style={"color": "#e94560", "margin": 0, "fontSize": "1.5rem"}),
+                html.H1("Reservoir Digital Twin", style={"color": "#c0392b", "margin": 0, "fontSize": "1.5rem", "fontWeight": "700"}),
                 html.Span("ROM-driven interactive 3D simulation", className="subtitle",
-                           style={"color": "#8899aa", "fontSize": "0.8rem"}),
+                           style={"color": "#666666", "fontSize": "0.8rem"}),
             ], width=6),
             dbc.Col([
                 html.Div(id="status-bar", children=[
                     html.Span(className="status-dot active"),
-                    html.Span("Engine Ready", style={"color": "#53d8fb", "fontSize": "0.85rem"}),
+                    html.Span("Engine Ready", style={"color": "#2980b9", "fontSize": "0.85rem"}),
                 ], style={"textAlign": "right", "paddingTop": "10px"}),
             ], width=6),
         ], className="dt-header", style={
-            "background": "linear-gradient(135deg, #0f3460, #16213e)",
+            "background": "linear-gradient(135deg, #ecf0f1, #ffffff)",
             "padding": "12px 24px",
-            "borderBottom": "2px solid #e94560",
+            "borderBottom": "2px solid #c0392b",
             "marginBottom": "8px",
         }),
 
@@ -70,7 +70,10 @@ def create_dash_app(engine, dt_cfg: dict) -> Dash:
             dbc.Col(build_time_series_panel(), width=3, style={"paddingLeft": "4px"}),
         ], style={"minHeight": "calc(100vh - 80px)"}),
 
-    ], fluid=True, style={"padding": "0", "background": "#1a1a2e"})
+        # ---- Bottom: AI Chat panel ----
+        build_chat_panel(),
+
+    ], fluid=True, style={"padding": "0", "background": "#f8f9fa"})
 
     # ---- Register callbacks ----
     from .callbacks import register_callbacks  # deferred to avoid circular import

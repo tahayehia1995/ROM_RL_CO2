@@ -20,6 +20,13 @@ ROM_Refactored/sr3_batch_output/batch_spatial_properties_*.h5
 # training_results: 14 pkl files (~1-2GB each)
 RL_Refactored/training_results/*.pkl
 
+# WandB logs
+RL_Refactored/wandb/
+
+# Model checkpoints and saved models
+RL_Refactored/checkpoints/
+ROM_Refactored/saved_models/
+
 # IDE / OS
 .vscode/
 .idea/

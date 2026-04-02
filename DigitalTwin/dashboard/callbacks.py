@@ -2,7 +2,8 @@
 Dashboard Callbacks
 ====================
 Wires model selection, well controls, RL toggle, prediction mode,
-economics, 3D viewports (Plotly Mesh3d), and time-series charts.
+economics, 3D viewports (Plotly Mesh3d), time-series charts, and
+AI chat assistant.
 """
 
 import json
@@ -15,12 +16,13 @@ from dash import html, dcc, Input, Output, State, callback_context, no_update
 from dash.exceptions import PreventUpdate
 
 from DigitalTwin.visualization import ReservoirSceneBuilder
+from DigitalTwin.analysis import ChatManager
 
-_DARK = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(22,33,62,0.8)",
-    font=dict(color="#e0e0e0", size=10),
+_CHART = dict(
+    template="plotly_white",
+    paper_bgcolor="rgba(255,255,255,0)",
+    plot_bgcolor="rgba(248,249,250,0.8)",
+    font=dict(color="#2c3e50", size=10),
     margin=dict(l=45, r=15, t=35, b=35),
     legend=dict(orientation="h", y=-0.25),
     height=220,
@@ -31,6 +33,8 @@ _WELL_NAMES_INJ = ["I1", "I2", "I4"]
 
 
 def register_callbacks(app, engine):
+
+    chat_mgr = ChatManager(engine)
 
     dx, dy, dz = engine.grid_spacing
     nx, ny, nz = engine.grid_dims
@@ -246,16 +250,18 @@ def register_callbacks(app, engine):
         rl_active = isinstance(rl_toggle, list) and "rl_on" in rl_toggle
         mode_label = "latent" if engine.prediction_mode == "latent" else "state"
         case_val = int(case_idx) if case_idx is not None else 0
-        status_msg = _status_html(f"{engine._loaded_model_label} [{mode_label}] Case {case_val}", "#53d8fb")
+        status_msg = _status_html(f"{engine._loaded_model_label} [{mode_label}] Case {case_val}", "#2980b9")
         slider_vals = (no_update,) * 6
 
         if triggered == "slider-case":
             engine.set_case(case_val)
             scene.active_mask = engine.active_mask
             state_3d = engine.reset()
+            chat_mgr.reset()
             obs = np.zeros(engine.num_inj + 2 * engine.num_prod)
         elif triggered == "btn-reset" or store is None:
             state_3d = engine.reset()
+            chat_mgr.reset()
             obs = np.zeros(engine.num_inj + 2 * engine.num_prod)
         elif triggered in viz_triggers:
             state_3d = engine.get_current_state()
@@ -266,7 +272,7 @@ def register_callbacks(app, engine):
             if rl_active:
                 if not engine._rl_agent_loaded:
                     status_msg = _status_html(
-                        "Select an RL policy from the dropdown first", "#e94560")
+                        "Select an RL policy from the dropdown first", "#c0392b")
                     controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
                 else:
                     rl_action = engine.get_rl_action()
@@ -275,7 +281,7 @@ def register_callbacks(app, engine):
                         algo_tag = engine._rl_algorithm_type or "RL"
                         status_msg = _status_html(
                             f"{algo_tag} driving [{mode_label}] Step {engine.step_index}",
-                            "#53d8fb")
+                            "#2980b9")
                         slider_vals = tuple(float(controls[j]) for j in range(min(6, len(controls))))
                     else:
                         controls = np.array([p1, p2, p3, i1, i2, i4], dtype=np.float32)
@@ -313,16 +319,16 @@ def register_callbacks(app, engine):
         wat_data = mgr.water_production_history()
         wat_data_bbl = wat_data / 5.615 if wat_data.ndim == 2 else wat_data
 
-        bhp_figs = _per_well_charts(bhp_data, _WELL_NAMES_INJ, steps, "#4499ff")
-        gas_figs = _per_well_charts(gas_data, _WELL_NAMES_PROD, steps, "#00dd44")
-        wat_figs = _per_well_charts(wat_data_bbl, _WELL_NAMES_PROD, steps, "#ff9900")
+        bhp_figs = _per_well_charts(bhp_data, _WELL_NAMES_INJ, steps, "#2980b9")
+        gas_figs = _per_well_charts(gas_data, _WELL_NAMES_PROD, steps, "#27ae60")
+        wat_figs = _per_well_charts(wat_data_bbl, _WELL_NAMES_PROD, steps, "#e67e22")
 
         kpis = mgr.compute_kpis()
         cum = np.cumsum(kpis.get("step_rewards", [0])).tolist()
         fig_npv = go.Figure()
         fig_npv.add_trace(go.Scatter(x=steps[:len(cum)], y=cum, mode="lines+markers",
-                                     name="NPV", line=dict(color="#e94560", width=2)))
-        fig_npv.update_layout(title=dict(text="Cumulative NPV", font=dict(size=10)), **_DARK)
+                                     name="NPV", line=dict(color="#c0392b", width=2)))
+        fig_npv.update_layout(title=dict(text="Cumulative NPV", font=dict(size=10)), **_CHART)
 
         return (
             fig_main, fig_si, fig_sj, fig_sk,
@@ -342,6 +348,125 @@ def register_callbacks(app, engine):
             raise PreventUpdate
         new = not disabled
         return new, ("Auto >>" if new else "Stop")
+
+    # ------------------------------------------------------------------
+    # AI CHAT ASSISTANT
+    # ------------------------------------------------------------------
+
+    @app.callback(
+        Output("chat-collapse", "is_open"),
+        Input("btn-chat-collapse", "n_clicks"),
+        State("chat-collapse", "is_open"),
+    )
+    def _toggle_chat(n, is_open):
+        return (not is_open) if n else is_open
+
+    @app.callback(
+        Output("input-llm-model", "value"),
+        Input("dd-llm-provider", "value"),
+        prevent_initial_call=True,
+    )
+    def _update_default_model(provider):
+        from DigitalTwin.analysis.llm_client import PROVIDER_DEFAULTS
+        return PROVIDER_DEFAULTS.get(provider, {}).get("model", "")
+
+    @app.callback(
+        Output("chat-history", "children"),
+        Output("store-chat-history", "data"),
+        Output("input-chat-message", "value"),
+        Output("chat-llm-status", "children"),
+        Input("btn-chat-send", "n_clicks"),
+        Input("btn-chat-clear", "n_clicks"),
+        State("input-chat-message", "value"),
+        State("dd-llm-provider", "value"),
+        State("input-llm-model", "value"),
+        State("input-api-key", "value"),
+        State("input-llm-temp", "value"),
+        State("store-chat-history", "data"),
+        prevent_initial_call=True,
+    )
+    def _chat_send_or_clear(
+        n_send, n_clear,
+        message, provider, model, api_key, temperature,
+        stored_history,
+    ):
+        ctx = callback_context
+        triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
+
+        if triggered == "btn-chat-clear":
+            chat_mgr.reset()
+            placeholder = html.Div(
+                "Chat cleared. Ask me anything about the reservoir.",
+                style={"color": "#667788", "fontStyle": "italic",
+                       "fontSize": "0.8rem", "textAlign": "center",
+                       "padding": "40px 0"},
+            )
+            return [placeholder], [], "", "Chat cleared"
+
+        if triggered == "btn-chat-send":
+            if not message or not message.strip():
+                raise PreventUpdate
+
+            chat_mgr.configure_llm(
+                provider=provider or "openai",
+                api_key=api_key or "",
+                model=model or "",
+                temperature=_safe_float(temperature, 0.7),
+            )
+
+            reply = chat_mgr.send(message.strip())
+
+            history = chat_mgr.history_for_display()
+            ui_children = _render_chat_history(history)
+            serialisable = [{"role": m["role"], "content": m["content"]}
+                            for m in history]
+            provider_label = (provider or "openai").capitalize()
+            status = f"{provider_label} | {model or 'default'}"
+
+            return ui_children, serialisable, "", status
+
+        raise PreventUpdate
+
+
+def _render_chat_history(history):
+    """Convert chat history list into styled Dash HTML components."""
+    children = []
+    for msg in history:
+        is_user = msg["role"] == "user"
+        bubble_style = {
+            "background": "#d5e8f0" if is_user else "#eaf2e6",
+            "color": "#2c3e50",
+            "padding": "8px 12px",
+            "borderRadius": "12px",
+            "marginBottom": "6px",
+            "maxWidth": "85%",
+            "fontSize": "0.82rem",
+            "lineHeight": "1.4",
+            "whiteSpace": "pre-wrap",
+            "wordBreak": "break-word",
+        }
+        align = "flex-end" if is_user else "flex-start"
+        label = html.Span(
+            "You" if is_user else "AI",
+            style={
+                "fontSize": "0.65rem",
+                "color": "#2980b9" if is_user else "#27ae60",
+                "fontWeight": "700",
+                "marginBottom": "2px",
+            },
+        )
+        children.append(
+            html.Div([
+                label,
+                html.Div(msg["content"], style=bubble_style),
+            ], style={
+                "display": "flex",
+                "flexDirection": "column",
+                "alignItems": align,
+                "marginBottom": "4px",
+            })
+        )
+    return children
 
 
 def _safe_float(val, default: float) -> float:
@@ -377,19 +502,19 @@ def _per_well_charts(data, names, steps, color):
             title=dict(text=name, font=dict(size=10)),
             yaxis=dict(range=y_range),
             showlegend=False,
-            **_DARK,
+            **_CHART,
         )
         figs.append(fig)
 
     while len(figs) < n_wells:
         fig = go.Figure()
-        fig.update_layout(title=dict(text="--", font=dict(size=10)), **_DARK)
+        fig.update_layout(title=dict(text="--", font=dict(size=10)), **_CHART)
         figs.append(fig)
 
     return figs
 
 
-def _status_html(msg, color="#53d8fb"):
+def _status_html(msg, color="#2980b9"):
     return html.Div([
         html.Span(className="status-dot active" if "fail" not in msg.lower() else "status-dot error"),
         html.Span(msg, style={"color": color, "fontSize": "0.85rem"}),
