@@ -90,233 +90,6 @@ def load_state_data_from_h5(state_name, state_folder, device):
     # Convert to tensor
     return torch.tensor(data, dtype=torch.float32)
 
-def apply_dashboard_scaling(data, state_name, rl_config, device):
-    """
-    Apply TRAINING-ONLY normalization parameters (FIXES data leakage)
-    🎯 PERFECT COMPATIBILITY: Uses corrected training-only parameters
-    """
-    print(f"   🔧 Applying TRAINING-ONLY normalization to {state_name}...")
-    
-    # 🎯 CRITICAL: Get TRAINING-ONLY normalization parameters (fixes data leakage)
-    training_params = rl_config.get('training_only_normalization_params', {})
-    
-    # Use training-only parameters if available (prevents data leakage)
-    # Otherwise fallback to preprocessing parameters, then emergency normalization
-    preprocessing_params = rl_config.get('preprocessing_normalization_params', {})
-    
-    if training_params:
-        print(f"      ✅ Using TRAINING-ONLY parameters (NO data leakage)")
-        return apply_training_only_normalization(data, state_name, training_params, device)
-    elif preprocessing_params:
-        print(f"      ⚠️ Using preprocessing parameters (may contain data leakage)")
-        return apply_preprocessing_normalization_legacy(data, state_name, preprocessing_params, device)
-    else:
-        print(f"      🚨 No normalization parameters found - using emergency normalization")
-        return apply_emergency_fallback_normalization(data, state_name, device)
-
-def apply_training_only_normalization(data, state_name, training_params, device):
-    """
-    Apply TRAINING-ONLY normalization parameters (eliminates data leakage)
-    """
-    if state_name not in training_params:
-        print(f"      ❌ No training-only parameters for {state_name}")
-        return apply_emergency_fallback_normalization(data, state_name, device)
-    
-    norm_params = training_params[state_name]
-    param_min = float(norm_params.get('min', 0.0))
-    param_max = float(norm_params.get('max', 1.0))
-    norm_type = norm_params.get('type', 'minmax')
-    
-    print(f"      📊 Training-only {norm_type.upper()}: [{param_min:.6f}, {param_max:.6f}] → [0, 1]")
-    
-    # Handle inactive cells for spatial data
-    if state_name in ['SW', 'SG', 'PRES', 'POROS', 'PERMI', 'PERMJ', 'PERMK']:
-        # Identify inactive cells (same logic as preprocessing)
-        if state_name in ['PRES', 'SW', 'SG', 'POROS']:
-            active_mask = data > 0.0
-        elif 'PERM' in state_name:
-            active_mask = data > 0.0
-        else:
-            active_mask = data >= 0.0
-        
-        print(f"      • Active cells: {torch.sum(active_mask).item():,} / {data.numel():,}")
-        
-        # Start with data copy to preserve inactive cells
-        scaled_data = data.clone()
-        
-        if param_max > param_min:
-            # Apply training-only transformation
-            scaled_all = (data - param_min) / (param_max - param_min)
-            # Only update active cells
-            scaled_data[active_mask] = scaled_all[active_mask]
-            # Inactive cells remain unchanged
-            
-            print(f"      ✅ TRAINING-ONLY normalization applied to active cells")
-        else:
-            print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-        
-        return scaled_data.to(device)
-    
-    else:
-        # For timeseries data (controls/observations), apply directly
-        if param_max > param_min:
-            scaled_data = (data - param_min) / (param_max - param_min)
-            print(f"      ✅ TRAINING-ONLY normalization applied to timeseries data")
-        else:
-            scaled_data = data.clone()
-            print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-        
-        return scaled_data.to(device)
-
-def apply_preprocessing_normalization_legacy(data, state_name, preprocessing_params, device):
-    """
-    Apply preprocessing normalization parameters (fallback when training-only params unavailable)
-    Note: May contain data leakage if preprocessing used full dataset
-    """
-    print(f"      ⚠️ Using preprocessing parameters (data leakage possible)")
-    
-    # Try to find parameters in spatial_channels (for state variables)
-    if state_name in preprocessing_params.get('spatial_channels', {}):
-        spatial_config = preprocessing_params['spatial_channels'][state_name]
-        norm_params = spatial_config.get('parameters', {})
-        norm_type = spatial_config.get('normalization_type', 'minmax')
-        
-        print(f"      📊 Legacy normalization type: {norm_type.upper()}")
-        
-        # Apply the legacy normalization
-        return apply_preprocessing_normalization(data, state_name, norm_params, norm_type, device)
-    
-    # Try to find parameters in control_variables
-    elif state_name in preprocessing_params.get('control_variables', {}):
-        control_config = preprocessing_params['control_variables'][state_name]
-        norm_params = control_config.get('parameters', {})
-        norm_type = control_config.get('normalization_type', 'minmax')
-        
-        print(f"      ✅ Using legacy preprocessing parameters for control {state_name}")
-        print(f"      📊 Normalization type: {norm_type.upper()}")
-        
-        return apply_preprocessing_normalization(data, state_name, norm_params, norm_type, device)
-    
-    # Try to find parameters in observation_variables  
-    elif state_name in preprocessing_params.get('observation_variables', {}):
-        obs_config = preprocessing_params['observation_variables'][state_name]
-        norm_params = obs_config.get('parameters', {})
-        norm_type = obs_config.get('normalization_type', 'minmax')
-        
-        print(f"      ✅ Using legacy preprocessing parameters for observation {state_name}")
-        print(f"      📊 Normalization type: {norm_type.upper()}")
-        
-        return apply_preprocessing_normalization(data, state_name, norm_params, norm_type, device)
-    
-    else:
-        print(f"      ❌ CRITICAL: No preprocessing parameters found for {state_name}!")
-        print(f"      💡 Available parameters: {list(preprocessing_params.keys())}")
-        print(f"      🔧 This indicates preprocessing dashboard hasn't been run yet")
-        
-        # Use emergency normalization (should not happen in normal workflow)
-        print(f"      🚨 Using emergency normalization")
-        return apply_emergency_fallback_normalization(data, state_name, device)
-
-def apply_preprocessing_normalization(data, state_name, norm_params, norm_type, device):
-    """
-    Apply the EXACT same normalization logic as the preprocessing dashboard
-    """
-    if norm_type == 'none':
-        print(f"      📊 No normalization applied (values preserved)")
-        return data.to(device)
-    
-    elif norm_type == 'log':
-        print(f"      📊 Applying LOG normalization (identical to preprocessing)")
-        
-        # Use EXACT same log normalization logic as preprocessing dashboard
-        epsilon = float(norm_params.get('epsilon', 1e-8))
-        log_min = float(norm_params.get('log_min', 0.0))
-        log_max = float(norm_params.get('log_max', 1.0))
-        min_positive = float(norm_params.get('min_positive', epsilon))
-        
-        # Apply identical transformation
-        positive_data = data[data > 0]
-        if len(positive_data) > 0:
-            min_pos = min_positive
-            data_shifted = torch.maximum(data, torch.tensor(min_pos, device=device))
-        else:
-            data_shifted = data + epsilon
-        
-        log_data = torch.log(data_shifted + epsilon)
-        
-        if log_max > log_min:
-            scaled_data = (log_data - log_min) / (log_max - log_min)
-        else:
-            scaled_data = torch.zeros_like(log_data)
-        
-        print(f"      ✅ LOG normalization applied: log range [{log_min:.6f}, {log_max:.6f}] → [0, 1]")
-        return scaled_data.to(device)
-    
-    else:  # minmax normalization (default)
-        print(f"      📊 Applying MIN-MAX normalization (identical to preprocessing)")
-        
-        # Use EXACT same min-max parameters as preprocessing dashboard
-        param_min = float(norm_params.get('min', 0.0))
-        param_max = float(norm_params.get('max', 1.0))
-        
-        # Handle inactive cells for spatial data
-        if state_name in ['SW', 'SG', 'PRES', 'POROS', 'PERMI', 'PERMJ', 'PERMK']:
-            # Identify inactive cells (same logic as preprocessing)
-            if state_name in ['PRES', 'SW', 'SG', 'POROS']:
-                active_mask = data > 0.0
-                inactive_marker = -0.145038 if state_name == 'PRES' else -1.0
-            elif 'PERM' in state_name:
-                active_mask = data > 0.0
-                inactive_marker = -1.0
-            else:
-                active_mask = data >= 0.0
-                inactive_marker = -1.0
-            
-            print(f"      • Active cells: {torch.sum(active_mask).item():,} / {data.numel():,}")
-            
-            # Start with data copy to preserve inactive cells
-            scaled_data = data.clone()
-            
-            if param_max > param_min:
-                # Apply same transformation as preprocessing
-                scaled_all = (data - param_min) / (param_max - param_min)
-                # Only update active cells
-                scaled_data[active_mask] = scaled_all[active_mask]
-                # Inactive cells remain unchanged
-                
-                print(f"      ✅ MIN-MAX applied to active cells, inactive cells preserved")
-            else:
-                print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-            
-            return scaled_data.to(device)
-        
-        else:
-            # For timeseries data (controls/observations), apply directly
-            if param_max > param_min:
-                scaled_data = (data - param_min) / (param_max - param_min)
-                print(f"      ✅ MIN-MAX normalization applied to timeseries data")
-            else:
-                scaled_data = data.clone()
-                print(f"      ⚠️ Warning: param_min == param_max ({param_min:.6f})")
-            
-            return scaled_data.to(device)
-
-def apply_emergency_fallback_normalization(data, state_name, device):
-    """
-    Emergency normalization when no parameters are available
-    Should not be used in normal workflow - indicates configuration issue
-    """
-    print(f"      ⚠️ WARNING: Using emergency normalization for {state_name}")
-    print(f"      💡 This should not happen - check normalization parameters")
-    # Simple min-max normalization using data statistics
-    data_min = torch.min(data)
-    data_max = torch.max(data)
-    if data_max > data_min:
-        scaled_data = (data - data_min) / (data_max - data_min)
-    else:
-        scaled_data = torch.zeros_like(data)
-    return scaled_data.to(device)
-
 def calculate_training_only_normalization_params(data_dir=None):
     """
     Calculate normalization parameters from training split only
@@ -449,126 +222,6 @@ def calculate_training_only_normalization_params(data_dir=None):
     print("✅ Training normalization parameters calculated!")
     return training_norm_params
 
-def save_normalization_parameters_for_rl(training_norm_params):
-    """
-    Save normalization parameters in the format expected by RL training
-    This ensures compatibility between E2C evaluation and RL training
-    """
-    print("💾 Saving normalization parameters for RL training compatibility...")
-    
-    # Create timestamp for filename (save inside RL_Refactored)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(_RL_DIR, f"normalization_parameters_{timestamp}.json")
-    
-    # Create the structure expected by RL training - FIXED STRUCTURE
-    norm_config = {
-        "spatial_channels": {
-            "SW": {
-                "normalization_type": "minmax",
-                "selected_for_training": True,
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['SW']['min']),
-                    "max": str(training_norm_params['SW']['max'])
-                }
-            },
-            "SG": {
-                "normalization_type": "minmax",
-                "selected_for_training": True,
-                "parameters": {
-                    "type": "minmax", 
-                    "min": str(training_norm_params['SG']['min']),
-                    "max": str(training_norm_params['SG']['max'])
-                }
-            },
-            "PRES": {
-                "normalization_type": "minmax",
-                "selected_for_training": True,
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['PRES']['min']),
-                    "max": str(training_norm_params['PRES']['max'])
-                }
-            }
-        },
-        "control_variables": {
-            "BHP": {
-                "normalization_type": "minmax",
-                "selected_wells": ["P1", "P2", "P3"],
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['BHP']['min']),
-                    "max": str(training_norm_params['BHP']['max'])
-                }
-            },
-            "GASRATSC": {
-                "normalization_type": "minmax",
-                "selected_wells": ["I1", "I2", "I3"],
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['GASRATSC']['min']),
-                    "max": str(training_norm_params['GASRATSC']['max'])
-                }
-            }
-        },
-        "observation_variables": {
-            "BHP": {
-                "normalization_type": "minmax",
-                "selected_wells": ["I1", "I2", "I3"],
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['BHP']['min']),
-                    "max": str(training_norm_params['BHP']['max'])
-                }
-            },
-            "GASRATSC": {
-                "normalization_type": "minmax", 
-                "selected_wells": ["P1", "P2", "P3"],
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['GASRATSC']['min']),
-                    "max": str(training_norm_params['GASRATSC']['max'])
-                }
-            },
-            "WATRATSC": {
-                "normalization_type": "minmax",
-                "selected_wells": ["P1", "P2", "P3"],
-                "parameters": {
-                    "type": "minmax",
-                    "min": str(training_norm_params['WATRATSC']['min']),
-                    "max": str(training_norm_params['WATRATSC']['max'])
-                }
-            }
-        },
-        "selection_summary": {
-            "spatial_channels": ["SW", "SG", "PRES"],
-            "control_variables": ["BHP", "GASRATSC"],
-            "observation_variables": ["BHP", "GASRATSC", "WATRATSC"],
-            "training_channels": ["SW", "SG", "PRES"]
-        },
-        "metadata": {
-            "created_timestamp": timestamp,
-            "source": "RL Configuration Dashboard - Optimal Structure",
-            "structure": "Controls: Producer BHP + Gas Injection, Observations: Injector BHP + Gas Production + Water Production",
-            "normalization_method": "training_only_parameters",
-            "data_leakage": "eliminated",
-            "performance_improvement": "78.4% + 76.2% better than alternatives"
-        }
-    }
-    
-    # Save to JSON file
-    try:
-        with open(filename, 'w') as f:
-            json.dump(norm_config, f, indent=4)
-        print(f"✅ Normalization parameters saved to: {filename}")
-        print(f"   📊 Available for RL training: {list(training_norm_params.keys())}")
-        print(f"   🎯 Structure: Optimal configuration for ROM compatibility")
-        print(f"   🔧 No data leakage: Training-only parameters")
-        return filename
-    except Exception as e:
-        print(f"❌ Error saving normalization parameters: {e}")
-        return None
-
 def _load_rom_norm_params_cached():
     """Load the ROM training normalization JSON (cached after first call)."""
     if hasattr(_load_rom_norm_params_cached, "_cache"):
@@ -583,17 +236,22 @@ def _load_rom_norm_params_cached():
     import json as _json
     with open(hits[0]) as f:
         cfg = _json.load(f)
+    def _clean(params):
+        out = {}
+        for k, v in params.items():
+            try:
+                out[k] = float(v) if isinstance(v, str) else v
+            except (ValueError, TypeError):
+                out[k] = v
+        return out
+
     merged = {}
-    for section in ("spatial_channels", "control_variables", "observation_variables"):
-        for var, info in cfg.get(section, {}).items():
-            p = info["parameters"]
-            cleaned = {}
-            for k, v in p.items():
-                try:
-                    cleaned[k] = float(v) if isinstance(v, str) else v
-                except (ValueError, TypeError):
-                    cleaned[k] = v
-            merged[var] = cleaned
+    for var, info in cfg.get("spatial_channels", {}).items():
+        merged[var] = _clean(info["parameters"])
+    for var, info in cfg.get("control_variables", {}).items():
+        merged['ctrl_' + var] = _clean(info["parameters"])
+    for var, info in cfg.get("observation_variables", {}).items():
+        merged['obs_' + var] = _clean(info["parameters"])
     print(f"      ROM norm params loaded from {hits[0]}")
     _load_rom_norm_params_cached._cache = merged
     return merged
@@ -1269,17 +927,23 @@ class RLConfigurationDashboard:
         from datetime import datetime
         
         try:
-            # Find the most recent normalization parameter file inside RL_Refactored
-            norm_files = [f for f in os.listdir(_RL_DIR)
-                          if f.startswith('normalization_parameters_') and f.endswith('.json')]
-            
+            rom_proc_dir = str(Path(_RL_DIR).parent / "ROM_Refactored" / "processed_data")
+            norm_files = []
+            for search_dir in [rom_proc_dir, _RL_DIR]:
+                try:
+                    norm_files = [os.path.join(search_dir, f)
+                                 for f in os.listdir(search_dir)
+                                 if f.startswith('normalization_parameters_') and f.endswith('.json')]
+                except FileNotFoundError:
+                    continue
+                if norm_files:
+                    break
+
             if not norm_files:
-                print(f"      ❌ No normalization parameter JSON files found in {_RL_DIR}")
-                print(f"      💡 Expected files like: normalization_parameters_YYYYMMDD_HHMMSS.json")
+                print(f"      ❌ No normalization parameter JSON files found")
                 return None
-            
-            # Get the most recent file
-            latest_norm_file = os.path.join(_RL_DIR, sorted(norm_files)[-1])
+
+            latest_norm_file = sorted(norm_files)[-1]
             print(f"      📂 Loading from: {latest_norm_file}")
             
             # Load the JSON file
@@ -3359,12 +3023,6 @@ Where:
                 print("      ✅ TRAINING-ONLY normalization parameters calculated successfully")
                 print(f"         🎯 NO DATA LEAKAGE: Parameters from training split only")
                 print(f"         📊 Variables: {list(training_params.keys())}")
-                
-                # ✨ NEW: Automatically save normalization parameters for RL training
-                norm_file = save_normalization_parameters_for_rl(training_params)
-                if norm_file:
-                    print(f"      🔗 RL training can now use: {norm_file}")
-                    config['normalization_file'] = norm_file
                 
                 # Compare with JSON parameters to show improvement
                 preprocessing_params = self._load_preprocessing_normalization_parameters()

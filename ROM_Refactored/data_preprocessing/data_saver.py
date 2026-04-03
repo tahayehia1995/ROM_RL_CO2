@@ -86,27 +86,31 @@ def save_normalization_parameters(norm_params: Dict[str, Any], data_dir: str, ns
                     training_position = training_channel_names.index(var_name)
                     norm_config['spatial_channels'][var_name]['training_position'] = training_position
     
-    # Store control variable normalization parameters
+    # Store control variable normalization parameters (per-well-group)
     if selected_controls:
         for var_name, config in selected_controls.items():
-            if var_name in norm_params:
+            ctrl_key = 'ctrl_' + var_name
+            param_key = ctrl_key if ctrl_key in norm_params else var_name
+            if param_key in norm_params:
                 norm_config['control_variables'][var_name] = {
                     'filename': config.get('filename', ''),
                     'selected_wells': config.get('wells', []),
                     'normalization_type': control_normalization_preferences.get(var_name, 'minmax') if control_normalization_preferences else 'minmax',
-                    'parameters': norm_params[var_name],
+                    'parameters': norm_params[param_key],
                     'variable_type': 'control'
                 }
-    
-    # Store observation variable normalization parameters
+
+    # Store observation variable normalization parameters (per-well-group)
     if selected_observations:
         for var_name, config in selected_observations.items():
-            if var_name in norm_params:
+            obs_key = 'obs_' + var_name
+            param_key = obs_key if obs_key in norm_params else var_name
+            if param_key in norm_params:
                 norm_config['observation_variables'][var_name] = {
                     'filename': config.get('filename', ''),
                     'selected_wells': config.get('wells', []),
                     'normalization_type': observation_normalization_preferences.get(var_name, 'minmax') if observation_normalization_preferences else 'minmax',
-                    'parameters': norm_params[var_name],
+                    'parameters': norm_params[param_key],
                     'variable_type': 'observation'
                 }
     

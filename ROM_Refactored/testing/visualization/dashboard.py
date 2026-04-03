@@ -967,63 +967,49 @@ class InteractiveVisualizationDashboard:
             return data * (field_max - field_min) + field_min
         
     def _denormalize_obs_data(self, data, obs_idx):
-        """Denormalize observation data based on observation type with support for 'none' normalization"""
-        if obs_idx < 3:  # BHP data
-            if 'BHP' in self.norm_params:
-                norm_params = self.norm_params['BHP']
-                if norm_params.get('type') == 'none':
-                    return data  # No normalization was applied, return as-is
-                elif norm_params.get('type') == 'log':
-                    # Reverse log normalization
-                    log_min = norm_params['log_min']
-                    log_max = norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = norm_params.get('epsilon', 1e-8)
-                    data_shift = norm_params.get('data_shift', 0)
-                    return np.exp(log_data) - epsilon + data_shift
-                else:
-                    # Standard min-max denormalization
-                    obs_min = norm_params['min']
-                    obs_max = norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-        elif obs_idx < 6:  # Gas production (indices 3-5)
-            if 'GASRATSC' in self.norm_params:
-                norm_params = self.norm_params['GASRATSC']
-                if norm_params.get('type') == 'none':
-                    return data  # No normalization was applied, return as-is
-                elif norm_params.get('type') == 'log':
-                    # Reverse log normalization
-                    log_min = norm_params['log_min']
-                    log_max = norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = norm_params.get('epsilon', 1e-8)
-                    data_shift = norm_params.get('data_shift', 0)
-                    return np.exp(log_data) - epsilon + data_shift
-                else:
-                    # Standard min-max denormalization
-                    obs_min = norm_params['min'] 
-                    obs_max = norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-        else:  # Water production (indices 6-8)
-            if 'WATRATSC' in self.norm_params:
-                norm_params = self.norm_params['WATRATSC']
-                if norm_params.get('type') == 'none':
-                    return data  # No normalization was applied, return as-is
-                elif norm_params.get('type') == 'log':
-                    # Reverse log normalization
-                    log_min = norm_params['log_min']
-                    log_max = norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = norm_params.get('epsilon', 1e-8)
-                    data_shift = norm_params.get('data_shift', 0)
-                    return np.exp(log_data) - epsilon + data_shift
-                else:
-                    # Standard min-max denormalization
-                    obs_min = norm_params['min']
-                    obs_max = norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-            
-        return data  # Fallback: return data as-is if no normalization params found
+        """Denormalize observation data based on observation type.
+
+        Supports all four normalization types: none, standard, log, minmax.
+        Observation layout: [BHP(0-2), GASRATSC(3-5), WATRATSC(6-8)]
+        """
+        if obs_idx < 3:
+            key = 'obs_BHP'
+        elif obs_idx < 6:
+            key = 'obs_GASRATSC'
+        else:
+            key = 'obs_WATRATSC'
+
+        # Fallback to unprefixed key for backward compatibility
+        if key not in self.norm_params:
+            key = key[4:]  # strip 'obs_'
+        if key not in self.norm_params:
+            return data
+
+        norm_params = self.norm_params[key]
+        ntype = norm_params.get('type', 'minmax')
+
+        if ntype == 'none':
+            return data
+
+        if ntype == 'standard':
+            mean = float(norm_params.get('mean', 0.0))
+            std = float(norm_params.get('std', 1.0))
+            if std == 0:
+                return np.full_like(data, mean) if hasattr(data, 'shape') else mean
+            return data * std + mean
+
+        if ntype == 'log':
+            log_min = norm_params['log_min']
+            log_max = norm_params['log_max']
+            log_data = data * (log_max - log_min) + log_min
+            epsilon = norm_params.get('epsilon', 1e-8)
+            data_shift = norm_params.get('data_shift', 0)
+            return np.exp(log_data) - epsilon + data_shift
+
+        # minmax (default)
+        obs_min = norm_params['min']
+        obs_max = norm_params['max']
+        return data * (obs_max - obs_min) + obs_min
     
     def _save_predictions(self, button):
         """Save all denormalized predictions to H5 files matching sr3_batch_output structure"""
@@ -2918,14 +2904,11 @@ class InteractiveVisualizationDashboard:
         
         params = None
         if obs_idx < 3:  # BHP data
-            if 'BHP' in norm_params:
-                params = norm_params['BHP']
+            params = norm_params.get('obs_BHP', norm_params.get('BHP'))
         elif obs_idx < 6:  # Gas production
-            if 'GASRATSC' in norm_params:
-                params = norm_params['GASRATSC']
+            params = norm_params.get('obs_GASRATSC', norm_params.get('GASRATSC'))
         else:  # Water production
-            if 'WATRATSC' in norm_params:
-                params = norm_params['WATRATSC']
+            params = norm_params.get('obs_WATRATSC', norm_params.get('WATRATSC'))
         
         if params is None or params.get('type') == 'none':
             return data_flat

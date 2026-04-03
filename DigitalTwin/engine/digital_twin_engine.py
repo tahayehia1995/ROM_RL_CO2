@@ -597,9 +597,10 @@ class DigitalTwinEngine:
                 cfg = json.load(f)
             for var_name, info in cfg.get("spatial_channels", {}).items():
                 self.norm_params[var_name] = self._to_numbers(info["parameters"])
-            for section in ("control_variables", "observation_variables"):
-                for var_name, info in cfg.get(section, {}).items():
-                    self.norm_params[var_name] = self._to_numbers(info["parameters"])
+            for var_name, info in cfg.get("control_variables", {}).items():
+                self.norm_params['ctrl_' + var_name] = self._to_numbers(info["parameters"])
+            for var_name, info in cfg.get("observation_variables", {}).items():
+                self.norm_params['obs_' + var_name] = self._to_numbers(info["parameters"])
             print(f"[DT-Engine] Spatial normalization from {best_spatial_file}")
 
         # Merge control/observation variables from other files (don't overwrite spatial)
@@ -609,10 +610,14 @@ class DigitalTwinEngine:
                 continue
             with open(fpath, "r") as f:
                 cfg = json.load(f)
-            for section in ("control_variables", "observation_variables"):
-                for var_name, info in cfg.get(section, {}).items():
-                    if var_name not in self.norm_params:
-                        self.norm_params[var_name] = self._to_numbers(info["parameters"])
+            for var_name, info in cfg.get("control_variables", {}).items():
+                key = 'ctrl_' + var_name
+                if key not in self.norm_params:
+                    self.norm_params[key] = self._to_numbers(info["parameters"])
+            for var_name, info in cfg.get("observation_variables", {}).items():
+                key = 'obs_' + var_name
+                if key not in self.norm_params:
+                    self.norm_params[key] = self._to_numbers(info["parameters"])
             # Only fill in MISSING spatial channels (never overwrite)
             for var_name, info in cfg.get("spatial_channels", {}).items():
                 if var_name not in self.norm_params:
@@ -667,11 +672,11 @@ class DigitalTwinEngine:
         physical[:, 3:6] = action_01[:, 3:6] * (gas_hi - gas_lo) + gas_lo
 
         rom = physical.clone()
-        if "BHP" in self.norm_params:
-            p = self.norm_params["BHP"]
+        p = self.norm_params.get("ctrl_BHP", self.norm_params.get("BHP"))
+        if p:
             rom[:, 0:3] = (physical[:, 0:3] - p["min"]) / (p["max"] - p["min"])
-        if "GASRATSC" in self.norm_params:
-            p = self.norm_params["GASRATSC"]
+        p = self.norm_params.get("ctrl_GASRATSC", self.norm_params.get("GASRATSC"))
+        if p:
             rom[:, 3:6] = (physical[:, 3:6] - p["min"]) / (p["max"] - p["min"])
         return rom
 
@@ -690,21 +695,22 @@ class DigitalTwinEngine:
             gas_lo = self.restricted_action_ranges["gas_injection"]["min"]
             gas_hi = self.restricted_action_ranges["gas_injection"]["max"]
         else:
-            bhp_lo = float(self.norm_params.get("BHP", {}).get("min", self.restricted_action_ranges["producer_bhp"]["min"]))
-            bhp_hi = float(self.norm_params.get("BHP", {}).get("max", self.restricted_action_ranges["producer_bhp"]["max"]))
-            gas_lo = float(self.norm_params.get("GASRATSC", {}).get("min", self.restricted_action_ranges["gas_injection"]["min"]))
-            gas_hi = float(self.norm_params.get("GASRATSC", {}).get("max", self.restricted_action_ranges["gas_injection"]["max"]))
+            bp = self.norm_params.get("ctrl_BHP", self.norm_params.get("BHP", {}))
+            bhp_lo = float(bp.get("min", self.restricted_action_ranges["producer_bhp"]["min"]))
+            bhp_hi = float(bp.get("max", self.restricted_action_ranges["producer_bhp"]["max"]))
+            gp = self.norm_params.get("ctrl_GASRATSC", self.norm_params.get("GASRATSC", {}))
+            gas_lo = float(gp.get("min", self.restricted_action_ranges["gas_injection"]["min"]))
+            gas_hi = float(gp.get("max", self.restricted_action_ranges["gas_injection"]["max"]))
         physical[:, 0:3] = action_01[:, 0:3] * (bhp_hi - bhp_lo) + bhp_lo
         physical[:, 3:6] = action_01[:, 3:6] * (gas_hi - gas_lo) + gas_lo
         return physical
 
     def _denorm_obs(self, yobs: torch.Tensor) -> torch.Tensor:
-        yobs = torch.clamp(yobs, 0.0, 1.0)
         out = yobs.clone()
         mapping = [
-            (range(0, self.num_inj), "BHP"),
-            (range(self.num_inj, self.num_inj + self.num_prod), "GASRATSC"),
-            (range(self.num_inj + self.num_prod, self.num_inj + 2 * self.num_prod), "WATRATSC"),
+            (range(0, self.num_inj), "obs_BHP"),
+            (range(self.num_inj, self.num_inj + self.num_prod), "obs_GASRATSC"),
+            (range(self.num_inj + self.num_prod, self.num_inj + 2 * self.num_prod), "obs_WATRATSC"),
         ]
         for idx_range, key in mapping:
             if key not in self.norm_params:

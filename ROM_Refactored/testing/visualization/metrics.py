@@ -319,12 +319,11 @@ class ModelEvaluationMetrics:
         # Denormalize if normalization parameters provided
         if norm_params:
             if obs_idx < 3:  # BHP data
-                if 'BHP' in norm_params:
-                    params = norm_params['BHP']
+                params = norm_params.get('obs_BHP', norm_params.get('BHP'))
+                if params is not None:
                     if params.get('type') == 'none':
-                        pass  # No normalization was applied, use data as-is
+                        pass
                     elif params.get('type') == 'log':
-                        # Reverse log normalization
                         log_min = params['log_min']
                         log_max = params['log_max']
                         pred_log = pred * (log_max - log_min) + log_min
@@ -334,14 +333,13 @@ class ModelEvaluationMetrics:
                         pred = np.exp(pred_log) - epsilon + data_shift
                         true = np.exp(true_log) - epsilon + data_shift
                     else:
-                        # Standard min-max denormalization
                         obs_min = params['min']
                         obs_max = params['max']
                         pred = pred * (obs_max - obs_min) + obs_min
                         true = true * (obs_max - obs_min) + obs_min
             elif obs_idx < 6:  # Water production
-                if 'WATRATSC' in norm_params:
-                    params = norm_params['WATRATSC']
+                params = norm_params.get('obs_WATRATSC', norm_params.get('WATRATSC'))
+                if params is not None:
                     if params.get('type') == 'none':
                         pass  # No normalization was applied, use data as-is
                     elif params.get('type') == 'log':
@@ -361,8 +359,8 @@ class ModelEvaluationMetrics:
                         pred = pred * (obs_max - obs_min) + obs_min
                         true = true * (obs_max - obs_min) + obs_min
             else:  # Gas production
-                if 'GASRATSC' in norm_params:
-                    params = norm_params['GASRATSC']
+                params = norm_params.get('obs_GASRATSC', norm_params.get('GASRATSC'))
+                if params is not None:
                     if params.get('type') == 'none':
                         pass  # No normalization was applied, use data as-is
                     elif params.get('type') == 'log':
@@ -653,24 +651,24 @@ class ModelEvaluationMetrics:
         # Denormalize if normalization parameters provided
         if norm_params:
             if obs_idx < 3:  # BHP data
-                if 'BHP' in norm_params:
-                    params = norm_params['BHP']
+                params = norm_params.get('obs_BHP', norm_params.get('BHP'))
+                if params is not None:
                     if params.get('type') != 'none':  # Only denormalize if not 'none'
                         obs_min = params['min']
                         obs_max = params['max']
                         pred = pred * (obs_max - obs_min) + obs_min
                         true = true * (obs_max - obs_min) + obs_min
             elif obs_idx < 6:  # Water production
-                if 'WATRATSC' in norm_params:
-                    params = norm_params['WATRATSC']
+                params = norm_params.get('obs_WATRATSC', norm_params.get('WATRATSC'))
+                if params is not None:
                     if params.get('type') != 'none':  # Only denormalize if not 'none'
                         obs_min = params['min'] 
                         obs_max = params['max']
                         pred = pred * (obs_max - obs_min) + obs_min
                         true = true * (obs_max - obs_min) + obs_min
             else:  # Gas production
-                if 'GASRATSC' in norm_params:
-                    params = norm_params['GASRATSC']
+                params = norm_params.get('obs_GASRATSC', norm_params.get('GASRATSC'))
+                if params is not None:
                     if params.get('type') != 'none':  # Only denormalize if not 'none'
                         obs_min = params['min']
                         obs_max = params['max']
@@ -809,15 +807,14 @@ def load_normalization_parameters(file_path):
             # Load the normalization parameters into current session
             self.norm_params = {}
             
-            # Extract norm_params from all variable types
             for var_name, info in norm_config['spatial_channels'].items():
                 self.norm_params[var_name] = info['parameters']
-            
+
             for var_name, info in norm_config['control_variables'].items():
-                self.norm_params[var_name] = info['parameters']
-                
+                self.norm_params['ctrl_' + var_name] = info['parameters']
+
             for var_name, info in norm_config['observation_variables'].items():
-                self.norm_params[var_name] = info['parameters']
+                self.norm_params['obs_' + var_name] = info['parameters']
             
             # Store the full configuration for reference
             self.loaded_norm_config = norm_config

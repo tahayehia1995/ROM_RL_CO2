@@ -335,18 +335,18 @@ class BaseOptimizer(ABC):
 
     def _setup_normalization_bounds(self):
         """Extract normalization bounds from norm_params."""
-        # BHP normalization bounds (for producers)
-        if 'BHP' in self.norm_params:
-            bhp_params = self.norm_params['BHP']
+        # BHP normalization bounds (for producer controls)
+        bhp_params = self.norm_params.get('ctrl_BHP', self.norm_params.get('BHP'))
+        if bhp_params:
             self.bhp_norm_min = float(bhp_params.get('min', 0))
             self.bhp_norm_max = float(bhp_params.get('max', 1))
         else:
             self.bhp_norm_min = 0.0
             self.bhp_norm_max = 5050.0
         
-        # Gas injection normalization bounds
-        if 'GASRATSC' in self.norm_params:
-            gas_params = self.norm_params['GASRATSC']
+        # Gas injection normalization bounds (for injector controls)
+        gas_params = self.norm_params.get('ctrl_GASRATSC', self.norm_params.get('GASRATSC'))
+        if gas_params:
             self.gas_norm_min = float(gas_params.get('min', 0))
             self.gas_norm_max = float(gas_params.get('max', 1))
         else:
@@ -669,8 +669,8 @@ class BaseOptimizer(ABC):
         yobs_physical = yobs_normalized.clone()
         
         # Denormalize injector BHP (first num_inj=3 observations, indices 0-2)
-        if 'BHP' in self.norm_params:
-            bhp_params = self.norm_params['BHP']
+        bhp_params = self.norm_params.get('obs_BHP', self.norm_params.get('BHP'))
+        if bhp_params:
             norm_type = bhp_params.get('type', 'minmax')
             
             if norm_type == 'log':
@@ -688,8 +688,8 @@ class BaseOptimizer(ABC):
                 yobs_physical[:, :self.num_inj] = yobs_normalized[:, :self.num_inj] * (bhp_max - bhp_min) + bhp_min
         
         # Denormalize gas production (next num_prod=3 observations, indices 3-5)
-        if 'GASRATSC' in self.norm_params:
-            gas_params = self.norm_params['GASRATSC']
+        gas_params = self.norm_params.get('obs_GASRATSC', self.norm_params.get('GASRATSC'))
+        if gas_params:
             norm_type = gas_params.get('type', 'minmax')
             
             if norm_type == 'log':
@@ -707,8 +707,8 @@ class BaseOptimizer(ABC):
                 )
         
         # Denormalize water production (last num_prod=3 observations, indices 6-8)
-        if 'WATRATSC' in self.norm_params:
-            wat_params = self.norm_params['WATRATSC']
+        wat_params = self.norm_params.get('obs_WATRATSC', self.norm_params.get('WATRATSC'))
+        if wat_params:
             norm_type = wat_params.get('type', 'minmax')
             
             if norm_type == 'log':

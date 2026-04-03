@@ -110,58 +110,68 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
             
         test_spatial_data[var_name] = torch.tensor(normalized_data, dtype=torch.float32)
     
-    # Load timeseries data with SAME normalization as training
-    test_timeseries_data = {}
+    # Load raw timeseries data (normalize per-well-group below)
+    test_timeseries_raw = {}
     all_timeseries_vars = set(list(selected_controls.keys()) + list(selected_observations.keys()))
-    
+
     for var_name in all_timeseries_vars:
         filename = f"batch_timeseries_data_{var_name}.h5"
         filepath = os.path.join(data_dir, filename)
         print(f"  📈 Loading test {var_name}...")
-        
+
         if not os.path.exists(filepath):
             print(f"    ⚠️ Warning: File not found: {filepath}")
             continue
-        
+
         with h5py.File(filepath, 'r') as hf:
-            raw_data = np.array(hf['data'])
-        
-        # Apply SAME normalization as training
-        if var_name not in norm_params:
-            print(f"    ⚠️ Warning: No normalization params for {var_name}, skipping")
-            continue
-            
-        norm_params_var = norm_params[var_name]
-        normalized_data = (raw_data - norm_params_var['min']) / (norm_params_var['max'] - norm_params_var['min'])
-        test_timeseries_data[var_name] = torch.tensor(normalized_data, dtype=torch.float32)
-    
-    # Step 2: Extract controls and observations using SAME user selections
-    print("🔧 Extracting controls and observations using user selections...")
-    
-    # Create control tensor using SAME logic as training
+            test_timeseries_raw[var_name] = np.array(hf['data'])
+
+    # Step 2: Extract controls and observations, normalizing per-well-group
+    print("🔧 Extracting controls and observations with per-well-group normalization...")
+
+    def _norm_minmax(raw, params):
+        p_min = float(params.get('min', 0))
+        p_max = float(params.get('max', 1))
+        return (raw - p_min) / (p_max - p_min) if p_max > p_min else raw * 0.0
+
     control_components = []
     for var_name, config in selected_controls.items():
-        if var_name not in test_timeseries_data:
+        if var_name not in test_timeseries_raw:
             continue
-        data = test_timeseries_data[var_name]
-        selected_data = data[:, :, config['wells']]
-        
-        for well_idx in range(selected_data.shape[2]):
-            control_components.append(selected_data[:, :, well_idx])
-    
+        raw = test_timeseries_raw[var_name]
+        selected_raw = raw[:, :, config['wells']]
+
+        ctrl_key = 'ctrl_' + var_name
+        p_key = ctrl_key if ctrl_key in norm_params else var_name
+        if p_key not in norm_params:
+            print(f"    ⚠️ Warning: No normalization params for {p_key}, skipping")
+            continue
+        normalized = _norm_minmax(selected_raw, norm_params[p_key])
+        data_t = torch.tensor(normalized, dtype=torch.float32)
+        for well_idx in range(data_t.shape[2]):
+            control_components.append(data_t[:, :, well_idx])
+        print(f"    📏 Control {var_name}: normalized with {p_key}")
+
     bhp_test = torch.stack(control_components, dim=2) if control_components else torch.zeros(0)
-    
-    # Create observation tensor using SAME logic as training  
+
     obs_components = []
     for var_name, config in selected_observations.items():
-        if var_name not in test_timeseries_data:
+        if var_name not in test_timeseries_raw:
             continue
-        data = test_timeseries_data[var_name]
-        selected_data = data[:, :, config['wells']]
-        
-        for well_idx in range(selected_data.shape[2]):
-            obs_components.append(selected_data[:, :, well_idx])
-    
+        raw = test_timeseries_raw[var_name]
+        selected_raw = raw[:, :, config['wells']]
+
+        obs_key = 'obs_' + var_name
+        p_key = obs_key if obs_key in norm_params else var_name
+        if p_key not in norm_params:
+            print(f"    ⚠️ Warning: No normalization params for {p_key}, skipping")
+            continue
+        normalized = _norm_minmax(selected_raw, norm_params[p_key])
+        data_t = torch.tensor(normalized, dtype=torch.float32)
+        for well_idx in range(data_t.shape[2]):
+            obs_components.append(data_t[:, :, well_idx])
+        print(f"    📏 Observation {var_name}: normalized with {p_key}")
+
     yobs_test = torch.stack(obs_components, dim=2) if obs_components else torch.zeros(0)
     
     print(f"📊 Test control data shape: {bhp_test.shape}")

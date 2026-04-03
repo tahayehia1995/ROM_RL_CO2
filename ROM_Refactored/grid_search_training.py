@@ -116,7 +116,7 @@ HYPERPARAMETER_GRID = {
     'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
     # FNO (Fourier Neural Operator encoder/decoder) - invertible spectral convolution, requires n_channels=4
-    'enable_fno': [True],                # Replace CNN encoder/decoder with FNO (spectral-based)
+    'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
     'fno_norm_type': ['batchnorm'],       # FNO normalization: 'batchnorm' (default), 'instancenorm', 'none'
     
     # Transition model type
@@ -2090,3 +2090,5 @@ from testing import create_testing_dashboard
 
 # Create and display the testing dashboard
 testing_dashboard = create_testing_dashboard()
+
+# %%

@@ -359,18 +359,18 @@ def load_normalization_params() -> Dict:
     with open(latest) as f:
         raw = json.load(f)
     params: Dict[str, Dict] = {}
-    for section in ('spatial_channels', 'control_variables', 'observation_variables'):
+    for section, prefix in [('spatial_channels', ''), ('control_variables', 'ctrl_'), ('observation_variables', 'obs_')]:
         block = raw.get(section, {})
         if isinstance(block, dict):
             for name, vd in block.items():
                 p = vd.get('parameters', vd)
-                params[name] = {'min': float(p.get('min', 0)), 'max': float(p.get('max', 1)),
-                                'type': vd.get('normalization_type', 'minmax')}
+                params[prefix + name] = {'min': float(p.get('min', 0)), 'max': float(p.get('max', 1)),
+                                         'type': vd.get('normalization_type', 'minmax')}
         elif isinstance(block, list):
             for entry in block:
                 name = entry.get('name', entry.get('variable', ''))
                 p = entry.get('parameters', entry)
-                params[name] = {'min': float(p.get('min', 0)), 'max': float(p.get('max', 1))}
+                params[prefix + name] = {'min': float(p.get('min', 0)), 'max': float(p.get('max', 1))}
     print(f"Loaded normalization params from {latest.name} ({len(params)} variables)")
     return params
 

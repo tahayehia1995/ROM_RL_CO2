@@ -1473,8 +1473,11 @@ class ScientificVisualization:
             import json
             from pathlib import Path
             
-            # Look for normalization parameters file in RL_Refactored
-            json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
+            # Look for normalization parameters file in ROM processed_data first
+            rom_proc = _RL_DIR.parent / "ROM_Refactored" / "processed_data"
+            json_files = glob.glob(str(rom_proc / "normalization_parameters_*.json"))
+            if not json_files:
+                json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
             
             if json_files:
                 # Use most recent file
@@ -1574,9 +1577,12 @@ class ScientificVisualization:
             import json
             from pathlib import Path
             
-            json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
+            rom_proc = _RL_DIR.parent / "ROM_Refactored" / "processed_data"
+            json_files = glob.glob(str(rom_proc / "normalization_parameters_*.json"))
             if not json_files:
-                print(f"⚠️ No normalization files found in {_RL_DIR} - keeping normalized data")
+                json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
+            if not json_files:
+                print(f"⚠️ No normalization files found - keeping normalized data")
                 return field_data
             
             # Get the latest normalization file

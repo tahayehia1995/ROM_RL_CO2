@@ -1603,14 +1603,13 @@ class OptimizerConfigDashboard:
                         'type': channel.get('normalization', 'minmax')
                     }
         
-        # Handle control_variables (can be dict or list)
+        # Handle control_variables with ctrl_ prefix
         if 'control_variables' in norm_data:
             controls = norm_data['control_variables']
             if isinstance(controls, dict):
                 for name, var_data in controls.items():
-                    # Parameters may be nested
                     params = var_data.get('parameters', var_data)
-                    self.optimizer_config['norm_params'][name] = {
+                    self.optimizer_config['norm_params']['ctrl_' + name] = {
                         'min': float(params.get('min', 0)),
                         'max': float(params.get('max', 1))
                     }
@@ -1618,32 +1617,29 @@ class OptimizerConfigDashboard:
                 for var in controls:
                     name = var.get('variable', var.get('name', ''))
                     params = var.get('parameters', var)
-                    self.optimizer_config['norm_params'][name] = {
+                    self.optimizer_config['norm_params']['ctrl_' + name] = {
                         'min': float(params.get('min', 0)),
                         'max': float(params.get('max', 1))
                     }
-        
-        # Handle observation_variables (can be dict or list)
+
+        # Handle observation_variables with obs_ prefix
         if 'observation_variables' in norm_data:
             obs = norm_data['observation_variables']
             if isinstance(obs, dict):
                 for name, var_data in obs.items():
-                    if name not in self.optimizer_config['norm_params']:
-                        # Parameters may be nested
-                        params = var_data.get('parameters', var_data)
-                        self.optimizer_config['norm_params'][name] = {
-                            'min': float(params.get('min', 0)),
-                            'max': float(params.get('max', 1))
-                        }
+                    params = var_data.get('parameters', var_data)
+                    self.optimizer_config['norm_params']['obs_' + name] = {
+                        'min': float(params.get('min', 0)),
+                        'max': float(params.get('max', 1))
+                    }
             elif isinstance(obs, list):
                 for var in obs:
                     name = var.get('variable', var.get('name', ''))
-                    if name not in self.optimizer_config['norm_params']:
-                        params = var.get('parameters', var)
-                        self.optimizer_config['norm_params'][name] = {
-                            'min': float(params.get('min', 0)),
-                            'max': float(params.get('max', 1))
-                        }
+                    params = var.get('parameters', var)
+                    self.optimizer_config['norm_params']['obs_' + name] = {
+                        'min': float(params.get('min', 0)),
+                        'max': float(params.get('max', 1))
+                    }
         
         print(f"   ✅ Loaded normalization params from {latest_file.name}")
     

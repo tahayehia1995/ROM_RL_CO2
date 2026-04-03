@@ -44,7 +44,7 @@ model:
   sigma: 0.0
   enable_vae: false
 multimodal:
-  enable: false
+  enable: true
   static_latent_dim: 32
   dynamic_latent_dim: 96
   static_channels:
@@ -74,7 +74,7 @@ gnn:
   pooling: attention
   mask_file_path: sr3_batch_output/inactive_cell_locations.h5
 fno:
-  enable: true
+  enable: false
   encoder:
     width: 32
     n_layers: 4

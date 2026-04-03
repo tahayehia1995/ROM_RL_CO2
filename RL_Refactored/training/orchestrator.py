@@ -543,9 +543,9 @@ class EnhancedTrainingOrchestrator:
             def safe_float(value):
                 return float(value) if isinstance(value, str) else value
             
-            # Producer BHP (indices 0-2) - using global ROM parameters
-            if 'BHP' in norm_params:
-                bhp_params = norm_params['BHP']
+            # Producer BHP (indices 0-2) - using control ROM parameters
+            bhp_params = norm_params.get('ctrl_BHP', norm_params.get('BHP'))
+            if bhp_params:
                 bhp_min = safe_float(bhp_params['min'])
                 bhp_max = safe_float(bhp_params['max'])
                 
@@ -555,9 +555,9 @@ class EnhancedTrainingOrchestrator:
                     physical_value = normalized_value * (bhp_max - bhp_min) + bhp_min
                     action_physical[f"{well_name}_BHP_psi"] = physical_value
             
-            # Gas Injection (indices 3-5) - using global ROM parameters
-            if 'GASRATSC' in norm_params:
-                gas_params = norm_params['GASRATSC']
+            # Gas Injection (indices 3-5) - using control ROM parameters
+            gas_params = norm_params.get('ctrl_GASRATSC', norm_params.get('GASRATSC'))
+            if gas_params:
                 gas_min = safe_float(gas_params['min'])
                 gas_max = safe_float(gas_params['max'])
                 
@@ -576,63 +576,44 @@ class EnhancedTrainingOrchestrator:
     
     def _load_latest_preprocessing_parameters(self):
         """
-        Load latest preprocessing parameters using IDENTICAL method as E2C evaluation
-        This ensures perfect consistency with the evaluation process
+        Load normalization parameters from the ROM preprocessing JSON
+        (same source used during ROM training and Z0 encoding).
+        Falls back to RL_Refactored/ if no ROM file is found.
         """
         try:
-            # Try to find the EXACT same normalization files that E2C evaluation uses
-            json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
-            pkl_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.pkl"))
+            rom_proc_dir = str(_RL_DIR.parent / "ROM_Refactored" / "processed_data")
+            json_files = glob.glob(str(Path(rom_proc_dir) / "normalization_parameters_*.json"))
+            pkl_files = glob.glob(str(Path(rom_proc_dir) / "normalization_parameters_*.pkl"))
+            if not json_files and not pkl_files:
+                json_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.json"))
+                pkl_files = glob.glob(str(_RL_DIR / "normalization_parameters_*.pkl"))
             
             # Sort by modification time to get the latest (same logic as E2C evaluation)
             json_files.sort(key=lambda x: Path(x).stat().st_mtime, reverse=True)
             pkl_files.sort(key=lambda x: Path(x).stat().st_mtime, reverse=True)
             
             # Try to load the latest JSON file first (same priority as E2C evaluation)
+            def _extract_prefixed(norm_config):
+                norm_params = {}
+                for var_name, info in norm_config.get('spatial_channels', {}).items():
+                    norm_params[var_name] = info['parameters']
+                for var_name, info in norm_config.get('control_variables', {}).items():
+                    norm_params['ctrl_' + var_name] = info['parameters']
+                for var_name, info in norm_config.get('observation_variables', {}).items():
+                    norm_params['obs_' + var_name] = info['parameters']
+                return norm_params
+
             if json_files:
                 latest_json = json_files[0]
                 with open(latest_json, 'r') as f:
                     norm_config = json.load(f)
-                
-                # Extract norm_params in EXACT same format as E2C evaluation
-                norm_params = {}
-                
-                # Load spatial channel parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('spatial_channels', {}).items():
-                    norm_params[var_name] = info['parameters']
-                
-                # Load control variable parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('control_variables', {}).items():
-                    norm_params[var_name] = info['parameters']
-                    
-                # Load observation variable parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('observation_variables', {}).items():
-                    norm_params[var_name] = info['parameters']
-                
-                return norm_params
-            
-            # Try pickle file as fallback (same fallback logic as E2C evaluation)
+                return _extract_prefixed(norm_config)
+
             elif pkl_files:
                 latest_pkl = pkl_files[0]
                 with open(latest_pkl, 'rb') as f:
                     norm_config = pickle.load(f)
-                
-                # Extract norm_params in EXACT same format as E2C evaluation
-                norm_params = {}
-                
-                # Load spatial channel parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('spatial_channels', {}).items():
-                    norm_params[var_name] = info['parameters']
-                
-                # Load control variable parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('control_variables', {}).items():
-                    norm_params[var_name] = info['parameters']
-                    
-                # Load observation variable parameters (EXACT same extraction as E2C evaluation)
-                for var_name, info in norm_config.get('observation_variables', {}).items():
-                    norm_params[var_name] = info['parameters']
-                
-                return norm_params
+                return _extract_prefixed(norm_config)
             
         except Exception as e:
             print(f"⚠️ Error loading preprocessing parameters: {e}")

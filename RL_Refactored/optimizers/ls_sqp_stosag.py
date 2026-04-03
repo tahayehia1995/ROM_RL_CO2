@@ -669,11 +669,13 @@ class LSSQPStoSAGOptimizer(BaseOptimizer):
         
         for i in range(self.num_controls):
             if i < self.num_prod:
-                low = self.norm_bounds['BHP']['min']
-                high = self.norm_bounds['BHP']['max']
+                b = self.norm_bounds.get('ctrl_BHP', self.norm_bounds.get('BHP', {}))
+                low = b.get('min', 0)
+                high = b.get('max', 1)
             else:
-                low = self.norm_bounds['GASRATSC']['min']
-                high = self.norm_bounds['GASRATSC']['max']
+                g = self.norm_bounds.get('ctrl_GASRATSC', self.norm_bounds.get('GASRATSC', {}))
+                low = g.get('min', 0)
+                high = g.get('max', 1)
             
             control_normalized[:, i] = (control_physical[:, i] - low) / (high - low + 1e-8)
         

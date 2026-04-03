@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "created_timestamp": "2026-03-28T22:41:48.043269",
+    "created_timestamp": "2026-04-02T17:12:40.443910",
     "data_directory": "sr3_batch_output/",
-    "n_steps": 8,
+    "n_steps": 5,
     "total_channels": 7,
     "selected_channels": 4,
     "total_controls": 6,
@@ -79,11 +79,13 @@
     },
     "PERMK": {
       "filename": "batch_spatial_properties_PERMK.h5",
-      "normalization_type": "minmax",
+      "normalization_type": "log",
       "parameters": {
-        "type": "minmax",
-        "min": "1e-06",
-        "max": "0.54247"
+        "type": "log",
+        "log_min": "-18.420681",
+        "log_max": "-0.6116225",
+        "epsilon": 1e-08,
+        "data_shift": 0
       },
       "selected_for_training": false
     }
@@ -100,7 +102,7 @@
       "parameters": {
         "type": "minmax",
         "min": "1087.7849",
-        "max": "5050.4287"
+        "max": "1305.3419"
       },
       "variable_type": "control"
     },
@@ -114,8 +116,8 @@
       "normalization_type": "minmax",
       "parameters": {
         "type": "minmax",
-        "min": "206203.52",
-        "max": "143972480.0"
+        "min": "6180072.5",
+        "max": "100646900.0"
       },
       "variable_type": "control"
     }
@@ -131,7 +133,7 @@
       "normalization_type": "minmax",
       "parameters": {
         "type": "minmax",
-        "min": "1087.7849",
+        "min": "1291.6425",
         "max": "5050.4287"
       },
       "variable_type": "observation"

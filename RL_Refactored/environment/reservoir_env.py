@@ -87,153 +87,78 @@ class ReservoirEnvironment(object):
         self.normalization_file_loaded = False
         self.has_authentic_norm_params = False
         
-        # Dashboard Action Range Configuration
-        # Initialize with default ranges - will be updated with dashboard configuration
-        self.restricted_action_ranges = {
-            'producer_bhp': {
-                'min': 1087.784912109375,  # psi - Default minimum
-                'max': 1305.3419189453125   # psi - Default maximum  
-            },
-            'gas_injection': {
-                'min': 6180072.5,          # ft³/day - Default minimum
-                'max': 100646896.0          # ft³/day - Default maximum
-            }
-        }
-        
         # Initialize with attempt to load latest normalization parameters automatically
         self._load_normalization_parameters_automatically()
 
-    def _map_agent_action_to_rom_input(self, action_01):
-        """
-        🎮 CORE FUNCTION: Map agent's [0,1] actions to optimal ROM structure
-        
-        Optimal control order: [Producer_BHP(0-2), Gas_Injection(3-5)]
-        This matches EXACTLY the structure proven optimal in corrected_model_test.py
-        
-        Args:
-            action_01: Agent's actions in [0,1] range
-            
-        Returns:
-            actions_for_rom: Actions in optimal order with training normalization
-        """
-        # Step 1: Convert agent [0,1] to restricted physical ranges
-        actions_restricted = action_01.clone()
-        
-        # ✅ CORRECTED: Map Producer BHP (first 3 actions) to restricted range
-        bhp_min = self.restricted_action_ranges['producer_bhp']['min']
-        bhp_max = self.restricted_action_ranges['producer_bhp']['max']
-        actions_restricted[:, 0:3] = action_01[:, 0:3] * (bhp_max - bhp_min) + bhp_min
-        
-        # ✅ CORRECTED: Map Gas Injection (last 3 actions) to restricted range  
-        gas_min = self.restricted_action_ranges['gas_injection']['min']
-        gas_max = self.restricted_action_ranges['gas_injection']['max']
-        actions_restricted[:, 3:6] = action_01[:, 3:6] * (gas_max - gas_min) + gas_min
-        
-        # Step 2: Normalize using TRAINING-ONLY parameters for ROM compatibility
-        actions_for_rom = actions_restricted.clone()
-        
-        # ✅ CORRECTED: Normalize Producer BHP using training parameters
-        if 'BHP' in self.norm_params:
-            bhp_params = self.norm_params['BHP']
-            full_bhp_min = float(bhp_params['min'])
-            full_bhp_max = float(bhp_params['max'])
-            actions_for_rom[:, 0:3] = (actions_restricted[:, 0:3] - full_bhp_min) / (full_bhp_max - full_bhp_min)
-        
-        # ✅ CORRECTED: Normalize Gas Injection using training parameters
-        if 'GASRATSC' in self.norm_params:
-            gas_params = self.norm_params['GASRATSC']
-            full_gas_min = float(gas_params['min'])
-            full_gas_max = float(gas_params['max'])
-            actions_for_rom[:, 3:6] = (actions_restricted[:, 3:6] - full_gas_min) / (full_gas_max - full_gas_min)
-        
-        return actions_for_rom
+        # Action ranges equal the training normalization range so that
+        # policy [0,1] maps directly to ROM normalized [0,1].
+        bhp_p = self.norm_params.get('ctrl_BHP', {})
+        gas_p = self.norm_params.get('ctrl_GASRATSC', {})
+        self.restricted_action_ranges = {
+            'producer_bhp': {
+                'min': self._to_float(bhp_p.get('min')),
+                'max': self._to_float(bhp_p.get('max'), default=1.0),
+            },
+            'gas_injection': {
+                'min': self._to_float(gas_p.get('min')),
+                'max': self._to_float(gas_p.get('max'), default=1.0),
+            }
+        }
 
     def _map_dashboard_action_to_rom_input(self, action_01):
+        """Map policy [0,1] actions directly to ROM-normalized controls.
+
+        Since action ranges equal the training normalization range,
+        policy [0,1] IS the ROM normalized [0,1].  This is a pass-through.
+
+        Action layout: [Producer_BHP(0..num_prod-1), Gas_Injection(num_prod..num_prod+num_inj-1)]
         """
-        🎯 NEW: Map dashboard-constrained actions to ROM input
-        
-        Policy now outputs [0,1] where [0,1] corresponds to dashboard ranges directly.
-        We need to convert to physical units using dashboard ranges, then normalize for ROM.
-        
-        Args:
-            action_01: Agent's actions in [0,1] range (corresponding to dashboard ranges)
-            
-        Returns:
-            actions_for_rom: Actions normalized for ROM using global training parameters
-        """
-        # Step 1: Convert [0,1] to dashboard physical ranges
-        actions_physical = action_01.clone()
-        
-        # Map Producer BHP (first 3 actions) from [0,1] to dashboard BHP range
-        bhp_min = self.restricted_action_ranges['producer_bhp']['min']
-        bhp_max = self.restricted_action_ranges['producer_bhp']['max']
-        actions_physical[:, 0:3] = action_01[:, 0:3] * (bhp_max - bhp_min) + bhp_min
-        
-        # Map Gas Injection (last 3 actions) from [0,1] to dashboard gas range  
-        gas_min = self.restricted_action_ranges['gas_injection']['min']
-        gas_max = self.restricted_action_ranges['gas_injection']['max']
-        actions_physical[:, 3:6] = action_01[:, 3:6] * (gas_max - gas_min) + gas_min
-        
-        # Step 2: Normalize using GLOBAL training parameters for ROM compatibility
-        actions_for_rom = actions_physical.clone()
-        
-        # Normalize Producer BHP using global training parameters
-        if 'BHP' in self.norm_params:
-            bhp_params = self.norm_params['BHP']
-            full_bhp_min = float(bhp_params['min'])
-            full_bhp_max = float(bhp_params['max'])
-            actions_for_rom[:, 0:3] = (actions_physical[:, 0:3] - full_bhp_min) / (full_bhp_max - full_bhp_min)
-        
-        # Normalize Gas Injection using global training parameters
-        if 'GASRATSC' in self.norm_params:
-            gas_params = self.norm_params['GASRATSC']
-            full_gas_min = float(gas_params['min'])
-            full_gas_max = float(gas_params['max'])
-            actions_for_rom[:, 3:6] = (actions_physical[:, 3:6] - full_gas_min) / (full_gas_max - full_gas_min)
-        
-        # Debug info for first few steps
         if self.istep <= 3:
-            print(f"      📊 Dashboard → Physical: BHP=[{actions_physical[0,0]:.1f},{actions_physical[0,1]:.1f},{actions_physical[0,2]:.1f}] psi")
-            print(f"      📊 Dashboard → Physical: Gas=[{actions_physical[0,3]:.0f},{actions_physical[0,4]:.0f},{actions_physical[0,5]:.0f}] ft³/day")
-            print(f"      🔧 Physical → ROM: [{actions_for_rom.min().item():.3f}, {actions_for_rom.max().item():.3f}]")
-        
-        return actions_for_rom
+            print(f"      🔧 Policy [0,1] → ROM [0,1] (pass-through): "
+                  f"[{action_01.min().item():.3f}, {action_01.max().item():.3f}]")
+
+        return action_01
 
     def _convert_dashboard_action_to_physical(self, action_01):
+        """Convert policy [0,1] actions to physical units for reward calculation.
+
+        Uses ctrl_ normalization params (action ranges = training range).
+        Action layout: [Producer_BHP(0..num_prod-1), Gas_Injection(num_prod..num_prod+num_inj-1)]
         """
-        🎯 NEW: Convert dashboard [0,1] actions to physical units for reward calculation
-        
-        Args:
-            action_01: Agent's actions in [0,1] range (corresponding to dashboard ranges)
-            
-        Returns:
-            actions_physical: Actions in physical units using dashboard ranges
-        """
+        np_ = self.num_prod
+        ni_ = self.num_inj
         actions_physical = action_01.clone()
-        
-        # Convert Producer BHP (first 3 actions) from [0,1] to dashboard BHP range
-        bhp_min = self.restricted_action_ranges['producer_bhp']['min']
-        bhp_max = self.restricted_action_ranges['producer_bhp']['max']
-        actions_physical[:, 0:3] = action_01[:, 0:3] * (bhp_max - bhp_min) + bhp_min
-        
-        # Convert Gas Injection (last 3 actions) from [0,1] to dashboard gas range  
-        gas_min = self.restricted_action_ranges['gas_injection']['min']
-        gas_max = self.restricted_action_ranges['gas_injection']['max']
-        actions_physical[:, 3:6] = action_01[:, 3:6] * (gas_max - gas_min) + gas_min
-        
+
+        bhp_p = self.norm_params.get('ctrl_BHP', {})
+        bhp_min = self._to_float(bhp_p.get('min'))
+        bhp_max = self._to_float(bhp_p.get('max'), default=1.0)
+        actions_physical[:, 0:np_] = action_01[:, 0:np_] * (bhp_max - bhp_min) + bhp_min
+
+        gas_p = self.norm_params.get('ctrl_GASRATSC', {})
+        gas_min = self._to_float(gas_p.get('min'))
+        gas_max = self._to_float(gas_p.get('max'), default=1.0)
+        actions_physical[:, np_:np_+ni_] = action_01[:, np_:np_+ni_] * (gas_max - gas_min) + gas_min
+
         return actions_physical
 
     def _load_normalization_parameters_automatically(self):
         """
-        Load normalization parameters using IDENTICAL method as E2C evaluation
-        This ensures 100% consistency with the evaluation process
+        Load normalization parameters from the ROM preprocessing JSON.
+
+        Priority order (first directory that contains a match wins):
+          1. ROM_Refactored/processed_data/  -- the exact file the ROM was
+             trained with (same source used by Z0 encoding)
+          2. CWD / RL_Refactored / script dir -- fallbacks
         """
-        print("🔄 Loading normalization parameters using IDENTICAL E2C evaluation method...")
-        
-        # Try to find the EXACT same normalization files that E2C evaluation uses
-        # Search CWD, the RL_Refactored directory, and the script's parent directory
+        print("🔄 Loading normalization parameters (ROM preprocessing source)...")
+
         rl_refactored_dir = str(Path(__file__).resolve().parent.parent)
+        rom_processed_dir = str(
+            Path(__file__).resolve().parent.parent.parent
+            / "ROM_Refactored" / "processed_data"
+        )
         search_dirs = list(dict.fromkeys([
+            rom_processed_dir,
             ".",
             rl_refactored_dir,
             str(Path.cwd()),
@@ -263,22 +188,17 @@ class ReservoirEnvironment(object):
                 with open(latest_json, 'r') as f:
                     norm_config = json.load(f)
                 
-                # Extract norm_params in EXACT same format as E2C evaluation
                 self.norm_params = {}
                 
-                # Load spatial channel parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('spatial_channels', {}).items():
                     self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
                 
-                # Load control variable parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('control_variables', {}).items():
-                    self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
+                    self.norm_params['ctrl_' + var_name] = self._convert_strings_to_numbers(info['parameters'])
                     
-                # Load observation variable parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('observation_variables', {}).items():
-                    self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
+                    self.norm_params['obs_' + var_name] = self._convert_strings_to_numbers(info['parameters'])
                 
-                # Store the full configuration for reference (same as E2C evaluation)
                 self.loaded_norm_config = norm_config
                 self.normalization_file_loaded = True
                 self.has_authentic_norm_params = True
@@ -301,25 +221,21 @@ class ReservoirEnvironment(object):
                 # Extract norm_params in EXACT same format as E2C evaluation
                 self.norm_params = {}
                 
-                # Load spatial channel parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('spatial_channels', {}).items():
                     self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
                 
-                # Load control variable parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('control_variables', {}).items():
-                    self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
+                    self.norm_params['ctrl_' + var_name] = self._convert_strings_to_numbers(info['parameters'])
                     
-                # Load observation variable parameters (EXACT same extraction as E2C evaluation)
                 for var_name, info in norm_config.get('observation_variables', {}).items():
-                    self.norm_params[var_name] = self._convert_strings_to_numbers(info['parameters'])
+                    self.norm_params['obs_' + var_name] = self._convert_strings_to_numbers(info['parameters'])
                 
-                # Store the full configuration for reference (same as E2C evaluation)
                 self.loaded_norm_config = norm_config
                 self.normalization_file_loaded = True
                 self.has_authentic_norm_params = True
                 loaded_successfully = True
                 
-                print(f"✅ Loaded IDENTICAL normalization parameters as E2C evaluation!")
+                print(f"✅ Loaded normalization parameters!")
                 print(f"   📊 Available parameters: {list(self.norm_params.keys())}")
                 
             except Exception as e:
@@ -337,7 +253,7 @@ class ReservoirEnvironment(object):
             raise ValueError("❌ CRITICAL: No normalization parameters found! Run dashboard configuration first to generate parameters.")
         
         # Final validation - ensure all required parameters are available
-        required_params = ['BHP', 'GASRATSC', 'WATRATSC']
+        required_params = ['ctrl_BHP', 'ctrl_GASRATSC', 'obs_BHP', 'obs_GASRATSC', 'obs_WATRATSC']
         missing_params = [p for p in required_params if p not in self.norm_params]
         if missing_params:
             raise ValueError(f"❌ CRITICAL: Missing required normalization parameters: {missing_params}. Available: {list(self.norm_params.keys())}")
@@ -426,69 +342,67 @@ class ReservoirEnvironment(object):
     
     def _denormalize_single_observation(self, data, obs_idx):
         """
-        Denormalize single observation using optimal ROM structure
-        
-        Optimal order: [Injector_BHP(0-2), Gas_Production(3-5), Water_Production(6-8)]
-        
-        Args:
-            data: Normalized observation data
-            obs_idx: Observation index
-            
-        Returns:
-            Denormalized data using optimal structure and training parameters
+        Denormalize single observation using optimal ROM structure.
+
+        Observation order: [Injector_BHP(0..num_inj-1),
+                            Gas_Production(num_inj..num_inj+num_prod-1),
+                            Water_Production(num_inj+num_prod..num_inj+2*num_prod-1)]
         """
-        if obs_idx < 3:  # Injector BHP (0-2)
-            if 'BHP' in self.norm_params:
-                norm_params = self.norm_params['BHP']
-                if norm_params.get('type') == 'none':
-                    return data
-                elif norm_params.get('type') == 'log':
-                    log_min = float(norm_params['log_min']) if isinstance(norm_params['log_min'], str) else norm_params['log_min']
-                    log_max = float(norm_params['log_max']) if isinstance(norm_params['log_max'], str) else norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = float(norm_params.get('epsilon', 1e-8)) if isinstance(norm_params.get('epsilon', 1e-8), str) else norm_params.get('epsilon', 1e-8)
-                    data_shift = float(norm_params.get('data_shift', 0)) if isinstance(norm_params.get('data_shift', 0), str) else norm_params.get('data_shift', 0)
-                    return torch.exp(log_data) - epsilon + data_shift
-                else:
-                    obs_min = float(norm_params['min']) if isinstance(norm_params['min'], str) else norm_params['min']
-                    obs_max = float(norm_params['max']) if isinstance(norm_params['max'], str) else norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-        elif obs_idx < 6:  # ✅ CORRECTED: Gas production (3-5)
-            if 'GASRATSC' in self.norm_params:
-                norm_params = self.norm_params['GASRATSC']
-                if norm_params.get('type') == 'none':
-                    return data
-                elif norm_params.get('type') == 'log':
-                    log_min = float(norm_params['log_min']) if isinstance(norm_params['log_min'], str) else norm_params['log_min']
-                    log_max = float(norm_params['log_max']) if isinstance(norm_params['log_max'], str) else norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = float(norm_params.get('epsilon', 1e-8)) if isinstance(norm_params.get('epsilon', 1e-8), str) else norm_params.get('epsilon', 1e-8)
-                    data_shift = float(norm_params.get('data_shift', 0)) if isinstance(norm_params.get('data_shift', 0), str) else norm_params.get('data_shift', 0)
-                    return torch.exp(log_data) - epsilon + data_shift
-                else:
-                    obs_min = float(norm_params['min']) if isinstance(norm_params['min'], str) else norm_params['min']
-                    obs_max = float(norm_params['max']) if isinstance(norm_params['max'], str) else norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-        else:  # ✅ CORRECTED: Water production (6-8)
-            if 'WATRATSC' in self.norm_params:
-                norm_params = self.norm_params['WATRATSC']
-                if norm_params.get('type') == 'none':
-                    return data
-                elif norm_params.get('type') == 'log':
-                    log_min = float(norm_params['log_min']) if isinstance(norm_params['log_min'], str) else norm_params['log_min']
-                    log_max = float(norm_params['log_max']) if isinstance(norm_params['log_max'], str) else norm_params['log_max']
-                    log_data = data * (log_max - log_min) + log_min
-                    epsilon = float(norm_params.get('epsilon', 1e-8)) if isinstance(norm_params.get('epsilon', 1e-8), str) else norm_params.get('epsilon', 1e-8)
-                    data_shift = float(norm_params.get('data_shift', 0)) if isinstance(norm_params.get('data_shift', 0), str) else norm_params.get('data_shift', 0)
-                    return torch.exp(log_data) - epsilon + data_shift
-                else:
-                    obs_min = float(norm_params['min']) if isinstance(norm_params['min'], str) else norm_params['min']
-                    obs_max = float(norm_params['max']) if isinstance(norm_params['max'], str) else norm_params['max']
-                    return data * (obs_max - obs_min) + obs_min
-            
-        # NO FALLBACKS - if we reach here, something is wrong with parameter loading
-        raise ValueError(f"❌ Missing normalization parameters for observation {obs_idx}! Available params: {list(self.norm_params.keys())}")
-    
+        if obs_idx < self.num_inj:
+            key = 'obs_BHP'
+        elif obs_idx < self.num_inj + self.num_prod:
+            key = 'obs_GASRATSC'
+        else:
+            key = 'obs_WATRATSC'
+
+        if key not in self.norm_params:
+            raise ValueError(
+                f"Missing normalization parameters for observation {obs_idx} "
+                f"(key={key})! Available: {list(self.norm_params.keys())}"
+            )
+
+        return self._apply_inverse_norm(data, self.norm_params[key])
+
+    @staticmethod
+    def _to_float(val, default=0.0):
+        """Safely cast a value (possibly a JSON string) to float."""
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
+    def _apply_inverse_norm(self, data, norm_params):
+        """Reverse a single normalization step.  Mirrors
+        ``ROM_Refactored.data_preprocessing.normalization.denormalize_data``
+        and supports all four normalization types."""
+        ntype = norm_params.get('type', 'minmax')
+
+        if ntype == 'none':
+            return data
+
+        if ntype == 'standard':
+            mean = self._to_float(norm_params.get('mean'))
+            std = self._to_float(norm_params.get('std'), default=1.0)
+            if std == 0:
+                return torch.full_like(data, mean)
+            return data * std + mean
+
+        if ntype == 'log':
+            log_min = self._to_float(norm_params.get('log_min'))
+            log_max = self._to_float(norm_params.get('log_max'), default=1.0)
+            epsilon = self._to_float(norm_params.get('epsilon'), default=1e-8)
+            data_shift = self._to_float(norm_params.get('data_shift'))
+            log_data = data * (log_max - log_min) + log_min
+            return torch.exp(log_data) - epsilon + data_shift
+
+        # minmax (default)
+        obs_min = self._to_float(norm_params.get('min'))
+        obs_max = self._to_float(norm_params.get('max'), default=1.0)
+        return data * (obs_max - obs_min) + obs_min
+
+
     def step(self, action):
         self.istep += 1
         
@@ -596,16 +510,10 @@ class ReservoirEnvironment(object):
                 
                 print(f"   🔧 Step {self.istep}: Observations normalized from ROM output → Injector_BHP=[{bhp_norm_str}], Gas_Production=[{gas_norm_str}], Water_Production=[{water_norm_str}]")
         
-        # Clamp normalized observations to valid [0,1] range before denormalization
-        # Prevents exponential explosion through log denormalization when latent drift
-        # produces out-of-range values. In state-based mode this rarely activates since
-        # spatial clamping already keeps observations bounded.
-        yobs_original = torch.clamp(yobs_original, min=0.0, max=1.0)
-        
-        # Apply ROM-based denormalization directly
+        # Denormalize observations with NO clamping in normalized space —
+        # identical to the ROM evaluation dashboard.  Only push negative
+        # physical values to zero afterwards (same as dashboard plotting).
         yobs_denorm = self._denormalize_observations_rom(yobs_original)
-        
-        # Ensure non-negative observations after denormalization
         yobs_denorm = torch.clamp(yobs_denorm, min=0.0)
         
         yobs = yobs_denorm
@@ -723,33 +631,36 @@ class ReservoirEnvironment(object):
         # For state-based mode, initialize spatial state
         if self.prediction_mode == 'state_based':
             try:
-                needs_original_spatial = hasattr(self.rom.model, 'encode_initial')
-                if needs_original_spatial:
-                    # GNN / Multimodal: need full spatial state
-                    if self.original_spatial_states is None:
-                        import builtins
-                        spatial_src = getattr(builtins, 'rl_spatial_states', None)
-                        if spatial_src is not None:
-                            self.original_spatial_states = spatial_src.to(self.device)
-                    
-                    if self.original_spatial_states is not None:
-                        idx = min(self._last_case_idx, self.original_spatial_states.shape[0] - 1)
-                        self.current_spatial_state = self.original_spatial_states[idx:idx+1]
-                        if self._sampling_count <= 2:
-                            model_type = ("GNN" if hasattr(self.rom.model, 'graph_manager')
-                                         else "FNO" if hasattr(self.rom.model, 'fno_encoder')
-                                         else "Multimodal")
-                            print(f"🎯 State-based mode: Using original spatial state for {model_type} model")
-                    else:
-                        raise RuntimeError(
-                            "GNN/Multimodal model requires original spatial states for state_based mode. "
-                            "Re-run the configuration dashboard (Step 1) and click 'Apply Configuration'."
-                        )
+                # Try to load original spatial states from builtins if not set
+                if self.original_spatial_states is None:
+                    import builtins
+                    spatial_src = getattr(builtins, 'rl_spatial_states', None)
+                    if spatial_src is not None:
+                        self.original_spatial_states = spatial_src.to(self.device)
+
+                needs_encode_initial = hasattr(self.rom.model, 'encode_initial')
+
+                if self.original_spatial_states is not None:
+                    # Use ground-truth spatial state (matches ROM evaluation pipeline)
+                    idx = min(self._last_case_idx, self.original_spatial_states.shape[0] - 1)
+                    self.current_spatial_state = self.original_spatial_states[idx:idx+1]
+                    if self._sampling_count <= 2:
+                        model_type = ("GNN" if hasattr(self.rom.model, 'graph_manager')
+                                     else "FNO" if hasattr(self.rom.model, 'fno_encoder')
+                                     else "Multimodal" if hasattr(self.rom.model, 'static_encoder')
+                                     else "Standard MSE2C")
+                        print(f"🎯 State-based mode: Using original spatial state for {model_type} model")
+                elif needs_encode_initial:
+                    raise RuntimeError(
+                        "GNN/Multimodal model requires original spatial states for state_based mode. "
+                        "Re-run the configuration dashboard (Step 1) and click 'Apply Configuration'."
+                    )
                 else:
-                    # Standard: decode latent to spatial
+                    # Fallback for standard MSE2C when originals unavailable
                     self.current_spatial_state = self.rom.model.decoder(z00)
                     if self._sampling_count <= 2:
-                        print("🎯 State-based mode: Initialized spatial state from Z0")
+                        print("🎯 State-based mode: Initialized spatial state from decoder(z0) "
+                              "(original spatial states not available)")
             except Exception as e:
                 print(f"⚠️ Failed to initialize spatial state: {e}")
                 print("   State-based mode may not work properly")

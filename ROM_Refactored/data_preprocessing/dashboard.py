@@ -810,27 +810,29 @@ class DataPreprocessingDashboard:
                         training_position = self.training_channel_names.index(var_name)
                         norm_config['spatial_channels'][var_name]['training_position'] = training_position
         
-        # 2. Store control variable normalization parameters 
+        # 2. Store control variable normalization parameters (per-well-group)
         if hasattr(self, 'selected_controls'):
             for var_name, config in self.selected_controls.items():
-                if var_name in self.norm_params:
+                ctrl_key = 'ctrl_' + var_name
+                if ctrl_key in self.norm_params:
                     norm_config['control_variables'][var_name] = {
                         'filename': config['filename'],
                         'selected_wells': config['wells'],
                         'normalization_type': self.control_normalization_preferences.get(var_name, 'minmax'),
-                        'parameters': self.norm_params[var_name],
+                        'parameters': self.norm_params[ctrl_key],
                         'variable_type': 'control'
                     }
-        
-        # 3. Store observation variable normalization parameters
+
+        # 3. Store observation variable normalization parameters (per-well-group)
         if hasattr(self, 'selected_observations'):
             for var_name, config in self.selected_observations.items():
-                if var_name in self.norm_params:
+                obs_key = 'obs_' + var_name
+                if obs_key in self.norm_params:
                     norm_config['observation_variables'][var_name] = {
-                        'filename': config['filename'], 
+                        'filename': config['filename'],
                         'selected_wells': config['wells'],
                         'normalization_type': self.observation_normalization_preferences.get(var_name, 'minmax'),
-                        'parameters': self.norm_params[var_name],
+                        'parameters': self.norm_params[obs_key],
                         'variable_type': 'observation'
                     }
         
@@ -1170,36 +1172,20 @@ class DataPreprocessingDashboard:
             self.spatial_data[var_name] = normalized_data
             self.norm_params[var_name] = norm_params
         
-        # Load timeseries data with user-specified normalization
-        self.timeseries_data = {}
+        # Load timeseries RAW data (normalization is deferred to _create_tensors
+        # so that control wells and observation wells get SEPARATE parameters).
+        self.timeseries_data_raw = {}
         all_timeseries_vars = set(list(self.selected_controls.keys()) + list(self.selected_observations.keys()))
-        
+
         for var_name in all_timeseries_vars:
             filename = f"batch_timeseries_data_{var_name}.h5"
-            print(f"  📈 Loading {var_name}...")
-            
+            print(f"  📈 Loading {var_name} (raw, normalization deferred)...")
+
             with h5py.File(os.path.join(self.data_dir, filename), 'r') as hf:
                 raw_data = np.array(hf['data'])
-            
-            # Determine normalization type based on user preferences
-            norm_type = 'minmax'  # Default for backward compatibility
-            
-            # Check if it's a control variable with normalization preference
-            if var_name in getattr(self, 'control_normalization_preferences', {}):
-                norm_type = self.control_normalization_preferences[var_name]
-                print(f"    🎛️ Control {var_name}: Using {norm_type.upper()} normalization")
-            
-            # Check if it's an observation variable with normalization preference
-            elif var_name in getattr(self, 'observation_normalization_preferences', {}):
-                norm_type = self.observation_normalization_preferences[var_name]
-                print(f"    📊 Observation {var_name}: Using {norm_type.upper()} normalization")
-            
-            else:
-                print(f"    📈 {var_name}: Using default MIN-MAX normalization")
-            
-            normalized_data, norm_params = normalize_dataset_inplace(raw_data, var_name, norm_type)
-            self.timeseries_data[var_name] = normalized_data
-            self.norm_params[var_name] = norm_params
+
+            self.timeseries_data_raw[var_name] = raw_data
+            print(f"    📊 Shape: {raw_data.shape}")
     
     def _create_tensors(self):
         """Create state, control, and observation tensors with deterministic channel ordering"""
@@ -1271,30 +1257,47 @@ class DataPreprocessingDashboard:
             self.state_tensor = self.global_state_tensor
             self.training_channel_names = self.global_channel_names
         
-        # Create control tensor
+        # Create control tensor — normalize per-well-group (control wells only)
         control_components = []
         for var_name, config in self.selected_controls.items():
-            data = self.timeseries_data[var_name]
-            selected_data = data[:, :, config['wells']]  # Select specific wells
-            
-            # Flatten well dimension
-            for well_idx in range(selected_data.shape[2]):
-                control_components.append(selected_data[:, :, well_idx])
-        
+            raw = self.timeseries_data_raw[var_name]
+            selected_raw = raw[:, :, config['wells']]
+
+            norm_type = getattr(self, 'control_normalization_preferences', {}).get(var_name, 'minmax')
+            ctrl_key = 'ctrl_' + var_name
+            normalized, nparams = normalize_dataset_inplace(
+                selected_raw.copy(), f"{var_name}_ctrl", norm_type
+            )
+            self.norm_params[ctrl_key] = nparams
+            print(f"  🎛️ Control {var_name} wells {config['wells']}: {norm_type} "
+                  f"min={nparams.get('min','')}, max={nparams.get('max','')}")
+
+            for well_idx in range(normalized.shape[2]):
+                control_components.append(normalized[:, :, well_idx])
+
         if control_components:
             self.control_tensor = np.stack(control_components, axis=2)
             print(f"  🎛️ Control tensor shape: {self.control_tensor.shape}")
-        
-        # Create observation tensor (Observation order: [Injector_BHP(0-2), Gas_Production(3-5), Water_Production(6-8)])
+
+        # Create observation tensor — normalize per-well-group (observation wells only)
+        # Observation order: [Injector_BHP(0-2), Gas_Production(3-5), Water_Production(6-8)]
         obs_components = []
         for var_name, config in self.selected_observations.items():
-            data = self.timeseries_data[var_name]
-            selected_data = data[:, :, config['wells']]  # Select specific wells
-            
-            # Flatten well dimension
-            for well_idx in range(selected_data.shape[2]):
-                obs_components.append(selected_data[:, :, well_idx])
-        
+            raw = self.timeseries_data_raw[var_name]
+            selected_raw = raw[:, :, config['wells']]
+
+            norm_type = getattr(self, 'observation_normalization_preferences', {}).get(var_name, 'minmax')
+            obs_key = 'obs_' + var_name
+            normalized, nparams = normalize_dataset_inplace(
+                selected_raw.copy(), f"{var_name}_obs", norm_type
+            )
+            self.norm_params[obs_key] = nparams
+            print(f"  📊 Observation {var_name} wells {config['wells']}: {norm_type} "
+                  f"min={nparams.get('min','')}, max={nparams.get('max','')}")
+
+            for well_idx in range(normalized.shape[2]):
+                obs_components.append(normalized[:, :, well_idx])
+
         if obs_components:
             self.observation_tensor = np.stack(obs_components, axis=2)
             print(f"  📊 Observation tensor shape: {self.observation_tensor.shape}")
