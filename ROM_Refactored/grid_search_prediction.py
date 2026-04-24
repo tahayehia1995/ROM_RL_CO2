@@ -387,6 +387,15 @@ def is_multimodal_weights(encoder_file: str) -> bool:
         return False
 
 
+def is_multi_embedding_weights(encoder_file: str) -> bool:
+    """Check if encoder weights belong to a multi-embedding multimodal model."""
+    try:
+        payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+        return isinstance(payload, dict) and bool(payload.get('_multi_embedding', False))
+    except Exception:
+        return False
+
+
 def extract_n_channels_from_weights(encoder_file: str) -> Optional[int]:
     """
     Extract n_channels from encoder weights.
@@ -560,11 +569,40 @@ def load_model_and_config(model_info: Dict[str, Any], config_path: str,
             except Exception:
                 pass
 
-        # Detect multimodal model from weights or filename
-        mm_detected = is_multimodal_weights(model_info['encoder'])
-        if not mm_detected:
+        # Detect multi-embedding multimodal model first (highest priority).
+        encoder_basename = os.path.basename(model_info['encoder'])
+        mem_detected = is_multi_embedding_weights(model_info['encoder'])
+        if not mem_detected:
+            mem_detected = '_memT' in encoder_basename or '_mem-' in encoder_basename
+        
+        if mem_detected:
+            if 'multi_embedding' not in config.config:
+                config.config['multi_embedding'] = {}
+            config.config['multi_embedding']['enable'] = True
+            # Force legacy switches off
+            config.config.setdefault('multimodal', {})['enable'] = False
+            config.config.setdefault('gnn', {})['enable']        = False
+            config.config.setdefault('fno', {})['enable']        = False
+            # Pull branches metadata from the encoder payload so the model can
+            # rebuild the right per-branch encoders/decoders.
+            try:
+                payload = torch.load(model_info['encoder'], map_location='cpu',
+                                     weights_only=False)
+                if isinstance(payload, dict) and payload.get('branches'):
+                    config.config['multi_embedding']['branches'] = payload['branches']
+                    branches = payload['branches']
+                    if any(b.get('encoder', {}).get('type') == 'fno'
+                           or (b.get('decoder') and b['decoder'].get('type') == 'fno')
+                           for b in branches):
+                        config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+            except Exception:
+                pass
+            print(f"   🔀 Multi-Embedding Multimodal model detected")
+        
+        # Detect (legacy) multimodal model from weights or filename
+        mm_detected = (not mem_detected) and is_multimodal_weights(model_info['encoder'])
+        if not mem_detected and not mm_detected:
             # Fallback: check filename for mmT marker
-            encoder_basename = os.path.basename(model_info['encoder'])
             mm_detected = '_mmT_' in encoder_basename or encoder_basename.endswith('_mmT.h5')
         
         if mm_detected:

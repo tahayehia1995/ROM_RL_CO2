@@ -22,6 +22,18 @@ def _resolve_latent_dim(config, rom_model=None):
     """Extract latent dimension from ROM model or fall back to config."""
     if rom_model is not None:
         try:
+            # Multi-Embedding Multimodal: per-branch encoders, exposes
+            # static_latent_dim + dynamic_latent_dim like the legacy multimodal.
+            if (hasattr(rom_model, 'model')
+                    and hasattr(rom_model.model, 'branches')
+                    and hasattr(rom_model.model, 'encoders')):
+                s_dim = rom_model.model.static_latent_dim
+                d_dim = rom_model.model.dynamic_latent_dim
+                latent_dim = s_dim + d_dim
+                branch_names = [b['name'] for b in rom_model.model.branches]
+                print(f"   Using Multi-Embedding ROM latent dimension: {latent_dim} "
+                      f"(static={s_dim}, dynamic={d_dim}, branches={branch_names})")
+                return latent_dim
             if hasattr(rom_model, 'model') and hasattr(rom_model.model, 'encode_initial'):
                 s_dim = rom_model.model.static_latent_dim
                 d_dim = rom_model.model.dynamic_latent_dim

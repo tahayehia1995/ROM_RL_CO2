@@ -122,17 +122,37 @@ class CustomizedLoss(nn.Module):
         # Per-element loss normalization configuration
         self.enable_per_element_normalization = config['loss'].get('enable_per_element_normalization', False)
         
-        # Detect multimodal/FNO mode (reconstruction uses dynamic channels only)
+        # Detect multimodal/FNO/multi-embedding mode (reconstruction effectively
+        # acts on dynamic channels only — static channels contribute zero by
+        # construction in multi_embedding too).
+        mem_enabled = config.config.get('multi_embedding', {}).get('enable', False)
         self.is_multimodal = (config.config.get('multimodal', {}).get('enable', False)
-                              or config.config.get('fno', {}).get('enable', False))
+                              or config.config.get('fno', {}).get('enable', False)
+                              or mem_enabled)
+        
+        # Optional per-channel weights for the reconstruction loss.
+        # Format: {channel_index: weight} (e.g. {0: 1.0, 1: 1.0, 2: 0.0, 3: 0.0}).
+        # Default behavior (None) is unchanged.
+        self.per_channel_weights_cfg = config['loss'].get('per_channel_weights', None)
+        if self.per_channel_weights_cfg is not None and not isinstance(self.per_channel_weights_cfg, dict):
+            raise ValueError("loss.per_channel_weights must be a dict {channel_index: weight} or None")
+        self._per_channel_weight_tensor = None  # built lazily on first use
         
         # Calculate normalization factors based on system dimensions
         if self.enable_per_element_normalization:
             # Spatial normalization: channels × grid cells
             input_shape = config['data']['input_shape']  # [channels, X, Y, Z]
             if self.is_multimodal:
-                mm_cfg = config.config.get('multimodal', {})
-                n_dynamic_ch = len(mm_cfg.get('dynamic_channels', [0, 1]))
+                if mem_enabled:
+                    mem_cfg = config.config.get('multi_embedding', {})
+                    branches = mem_cfg.get('branches', []) or []
+                    n_dynamic_ch = sum(
+                        len(b.get('channels', [])) for b in branches
+                        if b.get('role') == 'dynamic'
+                    ) or 2  # safe fallback
+                else:
+                    mm_cfg = config.config.get('multimodal', {})
+                    n_dynamic_ch = len(mm_cfg.get('dynamic_channels', [0, 1]))
                 self.spatial_normalization_factor = n_dynamic_ch * input_shape[1] * input_shape[2] * input_shape[3]
             else:
                 self.spatial_normalization_factor = input_shape[0] * input_shape[1] * input_shape[2] * input_shape[3]
@@ -339,6 +359,37 @@ class CustomizedLoss(nn.Module):
         
         return active_mask.to(device)
     
+    def _build_per_channel_weight_tensor(self, x):
+        """Build a (1, C, 1, 1, 1) sqrt-weight tensor from per_channel_weights_cfg.
+
+        Cached on first use so repeated forwards don't re-allocate.
+        """
+        import torch
+        if self.per_channel_weights_cfg is None:
+            return None
+        if (self._per_channel_weight_tensor is not None
+                and self._per_channel_weight_tensor.device == x.device
+                and self._per_channel_weight_tensor.dtype == x.dtype
+                and self._per_channel_weight_tensor.shape[1] == x.shape[1]):
+            return self._per_channel_weight_tensor
+        n_ch = x.shape[1]
+        weights = [float(self.per_channel_weights_cfg.get(c, 1.0)) for c in range(n_ch)]
+        if any(w < 0 for w in weights):
+            raise ValueError(f"per_channel_weights must be non-negative, got {weights}")
+        sqrt_w = torch.tensor([w ** 0.5 for w in weights], device=x.device, dtype=x.dtype)
+        view_shape = (1, n_ch) + (1,) * (x.dim() - 2)
+        self._per_channel_weight_tensor = sqrt_w.view(*view_shape)
+        return self._per_channel_weight_tensor
+
+    def _apply_per_channel_weights(self, x_true, x_pred):
+        """Multiply both tensors by sqrt(per-channel weight). Identity when not configured."""
+        if self.per_channel_weights_cfg is None:
+            return x_true, x_pred
+        sqrt_w = self._build_per_channel_weight_tensor(x_true)
+        if sqrt_w is None:
+            return x_true, x_pred
+        return x_true * sqrt_w, x_pred * sqrt_w
+    
     def _extract_well_locations(self, config, well_type):
         """Extract well locations from config and convert to tensor"""
         import torch
@@ -409,13 +460,17 @@ class CustomizedLoss(nn.Module):
                 batch_mask = self.active_mask[0]  # [X, Y, Z]
 
         # ===== ORIGINAL LOSS COMPONENTS =====
+        # Optional: per-channel weighting (opt-in via loss.per_channel_weights).
+        # We fold the weights into both tensors as sqrt(w) so the squared error
+        # becomes w * (x - x_pred)^2 channel-wise.
+        x0_w, x0_rec_w = self._apply_per_channel_weights(x0, x0_rec)
         # Compute reconstruction loss with optional inactive cell masking
         if self.enable_inactive_masking and batch_mask is not None:
             # Use masked reconstruction loss - excludes inactive cells
-            loss_rec_t = get_masked_reconstruction_loss(x0, x0_rec, batch_mask, self.reconstruction_variance)
+            loss_rec_t = get_masked_reconstruction_loss(x0_w, x0_rec_w, batch_mask, self.reconstruction_variance)
         else:
             # Use standard reconstruction loss
-            loss_rec_t = get_reconstruction_loss(x0, x0_rec, self.reconstruction_variance)
+            loss_rec_t = get_reconstruction_loss(x0_w, x0_rec_w, self.reconstruction_variance)
         
         loss_flux_t = 0
         loss_prod_bhp_t = 0
@@ -428,11 +483,12 @@ class CustomizedLoss(nn.Module):
             loss_flux_t += get_flux_loss(x0, x0_rec, self.channel_mapping)
         
         for x_next, x_next_pred in zip(X_next, X_next_pred):
+            x_next_w, x_next_pred_w = self._apply_per_channel_weights(x_next, x_next_pred)
             # Compute reconstruction loss with optional inactive cell masking
             if self.enable_inactive_masking and batch_mask is not None:
-                loss_rec_t1 += get_masked_reconstruction_loss(x_next, x_next_pred, batch_mask, self.reconstruction_variance)
+                loss_rec_t1 += get_masked_reconstruction_loss(x_next_w, x_next_pred_w, batch_mask, self.reconstruction_variance)
             else:
-                loss_rec_t1 += get_reconstruction_loss(x_next, x_next_pred, self.reconstruction_variance)
+                loss_rec_t1 += get_reconstruction_loss(x_next_w, x_next_pred_w, self.reconstruction_variance)
             
             # Add BHP loss if enabled
             if self.enable_bhp_loss:

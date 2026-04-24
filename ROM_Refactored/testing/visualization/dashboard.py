@@ -584,9 +584,13 @@ class InteractiveVisualizationDashboard:
                 indt_del = t_steps1 - t_steps
                 indt_del = indt_del / max(indt_del)
 
-                is_multimodal = hasattr(model, 'static_encoder') and not hasattr(model, 'graph_manager') and not hasattr(model, 'fno_encoder')
+                is_mem = hasattr(model, 'branches') and hasattr(model, 'encoders')
+                is_multimodal = (hasattr(model, 'static_encoder')
+                                 and not hasattr(model, 'graph_manager')
+                                 and not hasattr(model, 'fno_encoder')
+                                 and not is_mem)
                 is_gnn = hasattr(model, 'graph_manager')
-                is_fno = hasattr(model, 'fno_encoder')
+                is_fno = hasattr(model, 'fno_encoder') and not is_mem
                 has_encode_initial = hasattr(model, 'encode_initial')
 
                 state_pred_latent = torch.zeros_like(self.state_pred)
@@ -602,13 +606,18 @@ class InteractiveVisualizationDashboard:
                         enc_out = model.encoder(initial_spatial)
                         latent_state = enc_out[0] if isinstance(enc_out, (tuple, list)) else enc_out
 
-                    if is_multimodal or is_gnn or is_fno:
+                    if is_mem:
+                        static_dim = model.static_latent_dim
+                        x_full_ref = initial_spatial
+                    elif is_multimodal or is_gnn or is_fno:
                         static_dim = model.static_latent_dim
                         x_static_ref = initial_spatial[:, model.static_channels, :, :, :]
                     else:
                         static_dim = 0
 
                     def _decode_latent(z):
+                        if is_mem:
+                            return model.decode_latent_with_static_ref(z, x_full_ref)
                         if is_multimodal or is_gnn or is_fno:
                             z_s = z[:, :static_dim]
                             z_d = z[:, static_dim:]
@@ -753,7 +762,9 @@ class InteractiveVisualizationDashboard:
 
         model = self.my_rom.model
         has_encode_initial = hasattr(model, 'encode_initial')
-        model_type = ('GNN' if hasattr(model, 'graph_manager')
+        is_mem = hasattr(model, 'branches') and hasattr(model, 'encoders')
+        model_type = ('Multi-Embedding' if is_mem
+                       else 'GNN' if hasattr(model, 'graph_manager')
                        else 'FNO' if hasattr(model, 'fno_encoder')
                        else 'Multimodal' if hasattr(model, 'static_encoder')
                        else 'Base MSE2C')
@@ -4582,9 +4593,10 @@ class InteractiveVisualizationDashboard:
         norms_truth = np.zeros((nc, T))
 
         has_encode_initial = hasattr(model, 'encode_initial')
-        is_gnn = hasattr(model, 'graph_manager')
-        is_fno = hasattr(model, 'fno_encoder')
-        is_mm = hasattr(model, 'static_encoder') and not is_gnn and not is_fno
+        is_mem = hasattr(model, 'branches') and hasattr(model, 'encoders')
+        is_gnn = hasattr(model, 'graph_manager') and not is_mem
+        is_fno = hasattr(model, 'fno_encoder') and not is_mem
+        is_mm = hasattr(model, 'static_encoder') and not is_gnn and not is_fno and not is_mem
 
         with torch.no_grad():
             initial_spatial = self.state_pred[:, 0, :, :, :, :].to(self.device)

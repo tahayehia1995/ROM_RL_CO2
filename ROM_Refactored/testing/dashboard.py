@@ -432,7 +432,9 @@ class TestingDashboard:
                         trn_match = re.search(r'_trn([A-Z0-9_]+)', run_id)
                         transition = trn_match.group(1) if trn_match else 'LINEAR'
 
-                        if '_gnn' in run_id:
+                        if '_memT' in run_id or '_mem-' in run_id:
+                            encoding = 'Multi-Embed'
+                        elif '_gnn' in run_id:
                             encoding = 'GNN'
                         elif '_fno' in run_id:
                             encoding = 'FNO'
@@ -457,7 +459,9 @@ class TestingDashboard:
                         n_channels_str = f", ch={model_set['n_channels']}" if model_set.get('n_channels') is not None else ""
                         trn_match = re.search(r'_trn([A-Z0-9_]+)', run_id)
                         transition = trn_match.group(1) if trn_match else 'LINEAR'
-                        if '_gnn' in run_id:
+                        if '_memT' in run_id or '_mem-' in run_id:
+                            enc = 'MEM'
+                        elif '_gnn' in run_id:
                             enc = 'GNN'
                         elif '_fno' in run_id:
                             enc = 'FNO'
@@ -490,6 +494,19 @@ class TestingDashboard:
             (state_dict, is_multimodal_or_gnn)
         """
         if isinstance(payload, dict):
+            # Multi-embedding: encoders dict keyed by branch name
+            if payload.get('_multi_embedding', False):
+                encoders = payload.get('encoders', {})
+                if encoders:
+                    # Prefer a dynamic-branch encoder if branch metadata is available
+                    branches = payload.get('branches', []) or []
+                    dynamic_names = [b.get('name') for b in branches if b.get('role') == 'dynamic']
+                    for name in dynamic_names:
+                        if name in encoders:
+                            return encoders[name], True
+                    # Otherwise return the first encoder we can find
+                    first_key = next(iter(encoders))
+                    return encoders[first_key], True
             if payload.get('_multimodal', False) or payload.get('_gnn', False) or payload.get('_fno', False):
                 if 'dynamic_encoder' in payload:
                     return payload['dynamic_encoder'], True
@@ -510,6 +527,16 @@ class TestingDashboard:
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
             payload = torch.load(_win_long_path(encoder_file), map_location=device, weights_only=False)
+            # Multi-embedding payload: 4 channels by construction
+            if isinstance(payload, dict) and payload.get('_multi_embedding'):
+                branches = payload.get('branches', []) or []
+                if branches:
+                    seen = []
+                    for b in branches:
+                        seen.extend(b.get('channels', []) or [])
+                    if seen:
+                        return max(seen) + 1
+                return 4
             state_dict, is_mm = self._resolve_encoder_state_dict(payload)
             if is_mm:
                 # For multimodal the total n_channels = static_channels + dynamic_channels.
@@ -541,6 +568,22 @@ class TestingDashboard:
             # Standard encoder
             if isinstance(payload, dict) and 'fc_mean.weight' in payload:
                 return payload['fc_mean.weight'].shape[0]
+
+            # Multi-embedding encoder — sum every branch's latent dim
+            if isinstance(payload, dict) and payload.get('_multi_embedding'):
+                # Trust the embedded branch metadata when present
+                branches = payload.get('branches', []) or []
+                if branches:
+                    return sum(int(b.get('latent_dim', 0)) for b in branches)
+                # Otherwise inspect each encoder state dict
+                total = 0
+                for name, sd in (payload.get('encoders') or {}).items():
+                    if 'fc_mean.weight' in sd:
+                        total += sd['fc_mean.weight'].shape[0]
+                    elif 'fc.weight' in sd:
+                        total += sd['fc.weight'].shape[0]
+                if total > 0:
+                    return total
 
             # Multimodal / GNN encoder — sum branch latent dims
             if isinstance(payload, dict) and (payload.get('_multimodal') or payload.get('_gnn') or payload.get('_fno')):
@@ -741,6 +784,8 @@ class TestingDashboard:
                 print(f"   transition.encoder_hidden_dims: {encoder_hidden_dims}")
             
             # Detect model type from encoder weights or filename
+            mem_detected = False
+            mem_branches_payload = None
             gnn_detected = False
             fno_detected = False
             multimodal_detected = False
@@ -750,7 +795,10 @@ class TestingDashboard:
                     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     enc_payload = torch.load(_win_long_path(encoder_file), map_location=device, weights_only=False)
                     if isinstance(enc_payload, dict):
-                        if enc_payload.get('_gnn', False):
+                        if enc_payload.get('_multi_embedding', False):
+                            mem_detected = True
+                            mem_branches_payload = enc_payload.get('branches', None)
+                        elif enc_payload.get('_gnn', False):
                             gnn_detected = True
                         elif enc_payload.get('_fno', False):
                             fno_detected = True
@@ -759,12 +807,20 @@ class TestingDashboard:
                 except Exception:
                     pass
                 fname = os.path.basename(encoder_file)
-                if not gnn_detected and '_gnnT' in fname:
+                if not mem_detected and ('_memT' in fname or '_mem-' in fname):
+                    mem_detected = True
+                if not mem_detected and not gnn_detected and '_gnnT' in fname:
                     gnn_detected = True
-                if not fno_detected and not gnn_detected and '_fnoT' in fname:
+                if not mem_detected and not fno_detected and not gnn_detected and '_fnoT' in fname:
                     fno_detected = True
-                if not multimodal_detected and not gnn_detected and not fno_detected and '_mmT' in fname:
+                if (not mem_detected and not multimodal_detected and not gnn_detected
+                        and not fno_detected and '_mmT' in fname):
                     multimodal_detected = True
+            # Multi-embedding takes priority and forces all other flags off.
+            if mem_detected:
+                gnn_detected = False
+                fno_detected = False
+                multimodal_detected = False
 
             # Detect transition type from actual transition weights (not filename)
             transition_type_detected = None
@@ -924,7 +980,26 @@ class TestingDashboard:
                 elif '_trnlinear' in fname or '_trnLinear' in fname:
                     transition_type_detected = 'linear'
 
-            if gnn_detected:
+            if mem_detected:
+                # Multi-Embedding Multimodal: highest priority. Force every
+                # other model flag off and copy the branch metadata from the
+                # encoder payload into the config so MultiEmbeddingMultimodal
+                # can build the right per-branch encoders/decoders.
+                config.config.setdefault('multi_embedding', {})['enable'] = True
+                if mem_branches_payload:
+                    config.config['multi_embedding']['branches'] = mem_branches_payload
+                config.config.setdefault('gnn', {})['enable'] = False
+                config.config.setdefault('fno', {})['enable'] = False
+                config.config.setdefault('multimodal', {})['enable'] = False
+                # Auto-enable invertibility loss when any branch uses FNO
+                branches = config.config['multi_embedding'].get('branches', []) or []
+                if any(b.get('encoder', {}).get('type') == 'fno'
+                       or (b.get('decoder') and b['decoder'].get('type') == 'fno')
+                       for b in branches):
+                    config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+                print(f"   Multi-Embedding model detected: multi_embedding.enable=True "
+                      f"(branches: {[b.get('name') for b in branches]})")
+            elif gnn_detected:
                 if 'gnn' not in config.config:
                     config.config['gnn'] = {}
                 config.config['gnn']['enable'] = True
@@ -932,6 +1007,7 @@ class TestingDashboard:
                     config.config['multimodal'] = {}
                 config.config['multimodal']['enable'] = False
                 config.config.setdefault('fno', {})['enable'] = False
+                config.config.setdefault('multi_embedding', {})['enable'] = False
                 if 'loss' not in config.config:
                     config.config['loss'] = {}
                 config.config['loss']['enable_inactive_masking'] = True
@@ -940,17 +1016,20 @@ class TestingDashboard:
                 config.config.setdefault('fno', {})['enable'] = True
                 config.config.setdefault('gnn', {})['enable'] = False
                 config.config.setdefault('multimodal', {})['enable'] = False
+                config.config.setdefault('multi_embedding', {})['enable'] = False
                 config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
                 print(f"   FNO model detected: fno.enable=True")
             elif multimodal_detected:
                 config.config.setdefault('gnn', {})['enable'] = False
                 config.config.setdefault('fno', {})['enable'] = False
                 config.config.setdefault('multimodal', {})['enable'] = True
+                config.config.setdefault('multi_embedding', {})['enable'] = False
                 print(f"   Multimodal model detected: multimodal.enable=True")
             else:
                 config.config.setdefault('gnn', {})['enable'] = False
                 config.config.setdefault('fno', {})['enable'] = False
                 config.config.setdefault('multimodal', {})['enable'] = False
+                config.config.setdefault('multi_embedding', {})['enable'] = False
 
             # Update transition type if detected from filename
             if transition_type_detected:

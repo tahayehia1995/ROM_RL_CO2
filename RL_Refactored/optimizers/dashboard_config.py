@@ -1016,6 +1016,13 @@ class OptimizerConfigDashboard:
         if not info.get('fno') and '_fno' in filename and '_fnoF' not in filename:
             info['fno'] = True
         
+        # Detect Multi-Embedding Multimodal flag
+        if '_memT' in filename or '_mem-' in filename:
+            info['multi_embedding'] = True
+            mem_p = re.search(r'_mem-([a-zA-Z0-9-]+)', filename)
+            if mem_p:
+                info['mem_preset'] = mem_p.group(1).replace('-', '_')
+        
         # Detect normalization type
         norm_match = re.search(r'_norm(ba|gd)', filename)
         if norm_match:
@@ -1354,14 +1361,25 @@ class OptimizerConfigDashboard:
             rom_config.config['decoder']['norm_type'] = model_info['norm_type']
             print(f"   📊 Norm type: {model_info['norm_type']}")
         
-        # Detect GNN mode from filename or encoder weights
+        # Detect Multi-Embedding Multimodal first (highest priority)
         encoder_file = self.optimizer_config['selected_rom']['encoder']
-        is_gnn = model_info.get('gnn', self._detect_gnn_from_weights(encoder_file))
+        is_mem = model_info.get(
+            'multi_embedding',
+            self._detect_multi_embedding_from_weights(encoder_file)
+        )
+        if is_mem:
+            print(f"   📊 Multi-Embedding Multimodal: {is_mem}")
+        
+        # Detect GNN mode from filename or encoder weights
+        if is_mem:
+            is_gnn = False
+        else:
+            is_gnn = model_info.get('gnn', self._detect_gnn_from_weights(encoder_file))
         if is_gnn:
             print(f"   📊 GNN: {is_gnn}")
 
         # Detect FNO mode from filename or encoder weights
-        if is_gnn:
+        if is_mem or is_gnn:
             is_fno = False
         else:
             is_fno = model_info.get('fno', self._detect_fno_from_weights(encoder_file))
@@ -1369,7 +1387,7 @@ class OptimizerConfigDashboard:
             print(f"   📊 FNO: {is_fno}")
 
         # Detect multimodal mode from filename or encoder weights
-        if is_gnn or is_fno:
+        if is_mem or is_gnn or is_fno:
             is_multimodal = False
         elif 'multimodal' in model_info:
             is_multimodal = model_info['multimodal']
@@ -1378,8 +1396,23 @@ class OptimizerConfigDashboard:
             is_multimodal = self._detect_multimodal_from_weights(encoder_file)
             print(f"   📊 Multimodal: {is_multimodal} (from weights)")
         
+        rom_config.config.setdefault('multi_embedding', {})['enable'] = is_mem
         rom_config.config.setdefault('gnn', {})['enable'] = is_gnn
         rom_config.config.setdefault('fno', {})['enable'] = is_fno
+
+        if is_mem:
+            branches = self._read_multi_embedding_branches_from_weights(encoder_file)
+            if branches:
+                rom_config.config['multi_embedding']['branches'] = branches
+                rom_config.model['n_channels'] = 4
+                if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+                    if isinstance(rom_config.config['data']['input_shape'], list):
+                        rom_config.config['data']['input_shape'][0] = 4
+                rom_config.model['latent_dim'] = sum(int(b.get('latent_dim', 0)) for b in branches)
+                if any(b.get('encoder', {}).get('type') == 'fno'
+                       or (b.get('decoder') and b['decoder'].get('type') == 'fno')
+                       for b in branches):
+                    rom_config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
 
         if is_gnn:
             rom_config.model['n_channels'] = 4
@@ -1396,7 +1429,7 @@ class OptimizerConfigDashboard:
 
         rom_config.config.setdefault('multimodal', {})['enable'] = is_multimodal
         
-        if is_multimodal or is_fno:
+        if (is_multimodal or is_fno) and not is_mem:
             latent_dim = rom_config.model.get('latent_dim', 128)
             static_ld = rom_config.config['multimodal'].get('static_latent_dim', 32)
             dynamic_ld = rom_config.config['multimodal'].get('dynamic_latent_dim', 96)
@@ -1496,6 +1529,24 @@ class OptimizerConfigDashboard:
             return isinstance(payload, dict) and payload.get('_gnn', False)
         except:
             return False
+
+    def _detect_multi_embedding_from_weights(self, encoder_file: str) -> bool:
+        try:
+            import torch
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            return isinstance(payload, dict) and bool(payload.get('_multi_embedding', False))
+        except Exception:
+            return False
+
+    def _read_multi_embedding_branches_from_weights(self, encoder_file: str):
+        try:
+            import torch
+            payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+            if isinstance(payload, dict) and payload.get('_multi_embedding'):
+                return payload.get('branches', None)
+        except Exception:
+            pass
+        return None
 
     def _detect_fno_from_weights(self, encoder_file: str) -> bool:
         """Detect if encoder weights were saved by FNOE2C."""

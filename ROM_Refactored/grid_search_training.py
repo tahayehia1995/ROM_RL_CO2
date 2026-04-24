@@ -110,7 +110,7 @@ HYPERPARAMETER_GRID = {
     'enable_inactive_masking': [True],      # Enable inactive cell masking
     
     # Multimodal (two-branch fused encoder) - requires n_channels=4
-    'enable_multimodal': [True],           # Separate static (PERMI/POROS) from dynamic (SG/PRES) branches. Must be False if enable_gnn is True
+    'enable_multimodal': [False],           # Separate static (PERMI/POROS) from dynamic (SG/PRES) branches. Must be False if enable_gnn is True
     
     # GNN (Graph Neural Network encoder/decoder) - requires n_channels=4, torch_geometric
     'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
@@ -119,8 +119,14 @@ HYPERPARAMETER_GRID = {
     'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
     'fno_norm_type': ['batchnorm'],       # FNO normalization: 'batchnorm' (default), 'instancenorm', 'none'
     
+    # Multi-embedding multimodal: per-field encoder/decoder backbone choice (CNN or FNO per branch),
+    # one shared conditioned transition. Requires n_channels=4. Mutually exclusive with enable_gnn / enable_fno.
+    # When True, enable_multimodal is auto-disabled (this option subsumes it).
+    'enable_multi_embedding_multimodal': [True],   # NEW
+    'mem_branches_preset': ['cnn_sg__fno_pres'],    # Named preset (see MEM_PRESETS below)
+    
     # Transition model type
-    'transition_type': ['mamba2'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
+    'transition_type': ['Linear'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
     
     # Encoder enhancement strategies (reduce re-encoding error accumulation)
     'enable_jacobian_loss': [False],      # Contractive encoder via Jacobian regularization
@@ -130,6 +136,37 @@ HYPERPARAMETER_GRID = {
     'enable_scheduled_sampling': [False], # Gradually replace teacher forcing with self-sampling
     'enable_latent_noise': [False],       # Inject noise into latent space during training
 }
+
+# Multi-embedding multimodal presets. Each entry is a list of branch specs in
+# *declaration order*. Latent dim of each branch must sum to the global
+# `latent_dim` hyperparameter. Channel sets across branches must partition
+# {0,1,2,3} (SG, PRES, POROS, PERMI) exactly.
+MEM_PRESETS = {
+    # Default ask: CNN for static + saturation, FNO for pressure
+    'cnn_sg__fno_pres': [
+        {'name': 'static',     'channels': [2, 3], 'role': 'static',
+         'encoder': {'type': 'cnn'}, 'decoder': None,                'latent_dim': 32},
+        {'name': 'saturation', 'channels': [0],    'role': 'dynamic',
+         'encoder': {'type': 'cnn'}, 'decoder': {'type': 'cnn'},     'latent_dim': 48},
+        {'name': 'pressure',   'channels': [1],    'role': 'dynamic',
+         'encoder': {'type': 'fno'}, 'decoder': {'type': 'fno'},     'latent_dim': 48},
+    ],
+    # All-CNN (sanity check; should match current MultimodalMSE2C behavior)
+    'cnn_all': [
+        {'name': 'static',  'channels': [2, 3], 'role': 'static',
+         'encoder': {'type': 'cnn'}, 'decoder': None,             'latent_dim': 32},
+        {'name': 'dynamic', 'channels': [0, 1], 'role': 'dynamic',
+         'encoder': {'type': 'cnn'}, 'decoder': {'type': 'cnn'},  'latent_dim': 96},
+    ],
+    # All-FNO
+    'fno_all': [
+        {'name': 'static',  'channels': [2, 3], 'role': 'static',
+         'encoder': {'type': 'fno'}, 'decoder': None,             'latent_dim': 32},
+        {'name': 'dynamic', 'channels': [0, 1], 'role': 'dynamic',
+         'encoder': {'type': 'fno'}, 'decoder': {'type': 'fno'},  'latent_dim': 96},
+    ],
+}
+
 
 # Nested parameter grids (applied conditionally based on parent parameter values)
 LR_SCHEDULER_PARAMS = {
@@ -383,6 +420,33 @@ def validate_hyperparameter_combination(hyperparams: Dict[str, Any]) -> Tuple[bo
     if fno_enable and mm_enable:
         hyperparams['enable_multimodal'] = False
     
+    # Validate multi_embedding_multimodal: highest-priority, mutually exclusive with FNO/GNN
+    mem_enable = hyperparams.get('enable_multi_embedding_multimodal', False)
+    if mem_enable:
+        if hyperparams.get('enable_gnn', False):
+            return False, "multi_embedding_multimodal cannot be combined with enable_gnn"
+        if hyperparams.get('enable_fno', False):
+            return False, "multi_embedding_multimodal cannot be combined with enable_fno (it composes FNO internally)"
+        # multi_embedding subsumes the legacy two-branch multimodal mode
+        if hyperparams.get('enable_multimodal', False):
+            hyperparams['enable_multimodal'] = False
+        if hyperparams.get('n_channels', 2) != 4:
+            return False, "multi_embedding_multimodal requires n_channels=4 (SG, PRES, POROS, PERMI)"
+        preset_name = hyperparams.get('mem_branches_preset')
+        if preset_name not in MEM_PRESETS:
+            return False, (f"Unknown mem_branches_preset: {preset_name}. "
+                           f"Available: {list(MEM_PRESETS)}")
+        branches = MEM_PRESETS[preset_name]
+        total_branch_latent = sum(b['latent_dim'] for b in branches)
+        if total_branch_latent != hyperparams.get('latent_dim', total_branch_latent):
+            return False, (f"Sum of branch latent_dims ({total_branch_latent}) must equal "
+                           f"latent_dim ({hyperparams.get('latent_dim')})")
+        seen = []
+        for b in branches:
+            seen.extend(b['channels'])
+        if sorted(seen) != [0, 1, 2, 3] or len(set(seen)) != 4:
+            return False, (f"Branch channels must partition {{0,1,2,3}} exactly; got {seen}")
+    
     return True, None
 
 
@@ -610,6 +674,17 @@ def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
     if fno_enable:
         parts.append("fno")
     
+    # Multi-embedding multimodal: include preset name and a fixed token used for
+    # downstream filename-based detection (testing dashboard, RL, DigitalTwin).
+    mem_enable = hyperparams.get('enable_multi_embedding_multimodal', False)
+    if mem_enable:
+        preset = hyperparams.get('mem_branches_preset', 'unknown')
+        # Sanitize for filename: replace underscores with hyphens to keep _ as
+        # a token separator in run_id parsing.
+        preset_tag = preset.replace('_', '-')
+        parts.append(f"mem-{preset_tag}")
+        parts.append("memT")
+    
     # Transition type
     trn = hyperparams.get('transition_type', 'linear')
     if trn != 'linear':
@@ -704,6 +779,12 @@ def create_run_name(hyperparams: Dict[str, Any], run_index: int,
     fno_enable = hyperparams.get('enable_fno', False)
     if fno_enable:
         parts.append("fno")
+    
+    # Multi-embedding multimodal (only if enabled)
+    mem_enable = hyperparams.get('enable_multi_embedding_multimodal', False)
+    if mem_enable:
+        preset = hyperparams.get('mem_branches_preset', 'unknown')
+        parts.append(f"mem-{preset.replace('_', '-')}")
     
     return '_'.join(parts)
 
@@ -1042,6 +1123,29 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
         if 'fno' not in config.config:
             config.config['fno'] = {}
         config.config['fno']['enable'] = False
+    
+    # Update Multi-Embedding Multimodal configuration
+    if hyperparams.get('enable_multi_embedding_multimodal', False):
+        if 'multi_embedding' not in config.config:
+            config.config['multi_embedding'] = {}
+        config.config['multi_embedding']['enable'] = True
+        preset_name = hyperparams['mem_branches_preset']
+        config.config['multi_embedding']['preset'] = preset_name
+        # Deep-copy the preset to avoid mutating the global table later
+        import copy as _copy
+        config.config['multi_embedding']['branches'] = _copy.deepcopy(MEM_PRESETS[preset_name])
+        # Force the legacy switches off so the model factory dispatches to the new class
+        config.config.setdefault('multimodal', {})['enable'] = False
+        config.config.setdefault('gnn', {})['enable']        = False
+        config.config.setdefault('fno', {})['enable']        = False
+        # If any branch uses FNO, enable invertibility loss by default (per-branch in model)
+        if any(b['encoder']['type'] == 'fno' or (b.get('decoder') and b['decoder']['type'] == 'fno')
+               for b in MEM_PRESETS[preset_name]):
+            config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+    else:
+        if 'multi_embedding' not in config.config:
+            config.config['multi_embedding'] = {}
+        config.config['multi_embedding']['enable'] = False
     
     # Encoder enhancement: Jacobian regularization
     if 'enable_jacobian_loss' in hyperparams:
@@ -1521,6 +1625,8 @@ def main():
     print(f"   Dynamic loss weighting enable: {HYPERPARAMETER_GRID.get('dynamic_loss_weighting_enable', [])}")
     print(f"   Dynamic loss weighting methods: {HYPERPARAMETER_GRID.get('dynamic_loss_weighting_method', [])}")
     print(f"   Adversarial training enable: {HYPERPARAMETER_GRID.get('adversarial_enable', [])}")
+    print(f"   Multi-embedding multimodal enable: {HYPERPARAMETER_GRID.get('enable_multi_embedding_multimodal', [])}")
+    print(f"   Multi-embedding multimodal presets: {HYPERPARAMETER_GRID.get('mem_branches_preset', [])}")
     print(f"   Transition type: {HYPERPARAMETER_GRID.get('transition_type', ['linear'])}")
     print(f"   Channel names mapping: {CHANNEL_NAMES_MAP}")
     print("=" * 80)
@@ -1619,6 +1725,8 @@ def save_results(all_results: List[Dict], failed_runs: List[Dict],
             'transition_type',
             'dynamic_loss_weighting_enable', 'dynamic_loss_weighting_method', 'dynamic_loss_weighting_params',
             'adversarial_enable', 'adversarial_params',
+            'enable_multimodal', 'enable_gnn', 'enable_fno',
+            'enable_multi_embedding_multimodal', 'mem_branches_preset',
             'learning_rate', 'data_file', 
             'best_loss', 'best_observation_loss', 'best_reconstruction_loss',
             'final_loss', 'final_observation_loss', 'final_reconstruction_loss', 'final_transition_loss',

@@ -63,6 +63,17 @@ class WandBLogger:
             result['gnn'] = gnn_cfg.get('enable', False)
             fno_cfg = config.config.get('fno', {})
             result['fno'] = fno_cfg.get('enable', False)
+            mem_cfg = config.config.get('multi_embedding', {})
+            result['multi_embedding'] = mem_cfg.get('enable', False)
+            if mem_cfg.get('enable', False):
+                result['mem_preset'] = mem_cfg.get('preset', '')
+                # Compact branch summary for filtering
+                branches = mem_cfg.get('branches', []) or []
+                result['mem_branches'] = ','.join(
+                    f"{b.get('name','?')}({b.get('encoder',{}).get('type','?')}/"
+                    f"{(b.get('decoder') or {}).get('type','none')},z={b.get('latent_dim','?')})"
+                    for b in branches
+                )
         except Exception:
             pass
 

@@ -132,6 +132,7 @@ class DigitalTwinEngine:
         self.current_spatial_state: Optional[torch.Tensor] = None
         self.current_latent: Optional[torch.Tensor] = None
         self._initial_static_channels: Optional[torch.Tensor] = None
+        self._initial_full_spatial: Optional[torch.Tensor] = None
         self.step_index = 0
 
         # RL agent (lazy)
@@ -202,9 +203,11 @@ class DigitalTwinEngine:
                 continue
             seen.add(key)
 
-            # Detect type from filename
+            # Detect type from filename (multi-embedding takes priority)
             fname_lower = enc_name.lower()
-            if "_gnn" in fname_lower and "_mm" not in fname_lower:
+            if "_memt" in fname_lower or "_mem-" in fname_lower:
+                mtype = "multi_embedding"
+            elif "_gnn" in fname_lower and "_mm" not in fname_lower:
                 mtype = "gnn"
             elif "_fno" in fname_lower:
                 mtype = "fno"
@@ -256,12 +259,16 @@ class DigitalTwinEngine:
         dec_path = model_info["decoder"]
         trn_path = model_info.get("transition")
 
-        # Detect model type from encoder payload
+        # Detect model type from encoder payload (multi-embedding has priority)
         mtype = model_info.get("model_type", "cnn")
+        mem_branches_payload = None
         try:
             payload = torch.load(enc_path, map_location="cpu", weights_only=False)
             if isinstance(payload, dict):
-                if payload.get("_multimodal"):
+                if payload.get("_multi_embedding"):
+                    mtype = "multi_embedding"
+                    mem_branches_payload = payload.get("branches", None)
+                elif payload.get("_multimodal"):
                     mtype = "multimodal"
                 elif payload.get("_gnn"):
                     mtype = "gnn"
@@ -281,13 +288,27 @@ class DigitalTwinEngine:
 
         # Build fresh config with correct overrides
         cfg = Config(self._rom_cfg_path)
+        mem_cfg = cfg.config.setdefault("multi_embedding", {})
         gnn_cfg = cfg.config.setdefault("gnn", {})
         fno_cfg = cfg.config.setdefault("fno", {})
         mm_cfg = cfg.config.setdefault("multimodal", {})
 
+        mem_cfg["enable"] = (mtype == "multi_embedding")
         gnn_cfg["enable"] = (mtype == "gnn")
         fno_cfg["enable"] = (mtype == "fno")
         mm_cfg["enable"] = (mtype == "multimodal")
+        if mtype == "multi_embedding" and mem_branches_payload:
+            mem_cfg["branches"] = mem_branches_payload
+            # latent_dim = sum of branch latent dims; n_channels = 4 by construction
+            cfg.model["latent_dim"] = sum(int(b.get("latent_dim", 0)) for b in mem_branches_payload)
+            cfg.model["n_channels"] = 4
+            if "data" in cfg.config and "input_shape" in cfg.config["data"]:
+                if isinstance(cfg.config["data"]["input_shape"], list):
+                    cfg.config["data"]["input_shape"][0] = 4
+            if any(b.get("encoder", {}).get("type") == "fno"
+                   or (b.get("decoder") and b["decoder"].get("type") == "fno")
+                   for b in mem_branches_payload):
+                cfg.config.setdefault("loss", {})["enable_invertibility_loss"] = True
         cfg.config.setdefault("transition", {})["type"] = ttype
         cfg.config.setdefault("loss", {})["enable_inactive_masking"] = False
 
@@ -835,13 +856,21 @@ class DigitalTwinEngine:
     def _decode_to_spatial(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode latent to spatial.
 
-        Handles both Multimodal and GNN models (which have
-        ``static_latent_dim``) as well as plain CNN models.  Static
-        channels (permeability, porosity) are taken from the **initial**
-        state captured at ``reset()``.
+        Handles Multi-Embedding (per-branch decoders), Multimodal, and GNN
+        models (which all have ``static_latent_dim``) as well as plain CNN
+        models.  Static channels (permeability, porosity) are taken from
+        the **initial** state captured at ``reset()``.
         """
         with torch.no_grad():
             model = self.rom.model
+            # Multi-Embedding Multimodal: per-branch decoders + reassembly
+            # against the full initial spatial reference.
+            if hasattr(model, "decode_latent_with_static_ref"):
+                ref = (self._initial_full_spatial
+                       if self._initial_full_spatial is not None
+                       else self.current_spatial_state)
+                if ref is not None:
+                    return model.decode_latent_with_static_ref(latent, ref)
             if hasattr(model, "static_latent_dim"):
                 z_static = latent[:, :model.static_latent_dim]
                 z_dynamic = latent[:, model.static_latent_dim:]
@@ -879,6 +908,10 @@ class DigitalTwinEngine:
 
         self.current_spatial_state = initial_spatial.to(self.device)
         self.current_latent = self._encode_to_latent(self.current_spatial_state)
+
+        # Always cache the full initial spatial state so multi-embedding's
+        # decode_latent_with_static_ref has a static reference to copy from.
+        self._initial_full_spatial = self.current_spatial_state.clone()
 
         if self.rom is not None and hasattr(self.rom.model, "static_channels"):
             self._initial_static_channels = self.current_spatial_state[

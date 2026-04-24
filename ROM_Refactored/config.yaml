@@ -44,7 +44,7 @@ model:
   sigma: 0.0
   enable_vae: false
 multimodal:
-  enable: true
+  enable: false
   static_latent_dim: 32
   dynamic_latent_dim: 96
   static_channels:
@@ -263,7 +263,7 @@ decoder:
   use_exact_dimensions: true
   norm_type: batchnorm
 transition:
-  type: mamba2
+  type: linear
   encoder_hidden_dims:
   - 300
   - 300
@@ -639,3 +639,28 @@ experiment:
   early_stopping_patience: 50
 data_preprocessing_processing: *id001
 data_preprocessing_normalization: *id002
+multi_embedding:
+  enable: true
+  branches:
+  - name: static
+    role: static
+    encoder_type: cnn
+    decoder_type: null
+    channels:
+    - 2
+    - 3
+    latent_dim: 32
+  - name: saturation
+    role: dynamic
+    encoder_type: cnn
+    decoder_type: cnn
+    channels:
+    - 0
+    latent_dim: 48
+  - name: pressure
+    role: dynamic
+    encoder_type: fno
+    decoder_type: fno
+    channels:
+    - 1
+    latent_dim: 48

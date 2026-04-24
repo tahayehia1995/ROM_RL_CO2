@@ -132,6 +132,12 @@ def _parse_model_filename(filename: str) -> Dict:
         info['fno'] = True
     elif '_fnoF' in filename:
         info['fno'] = False
+    if '_memT' in filename or '_mem-' in filename:
+        info['multi_embedding'] = True
+        m_preset = re.search(r'_mem-([a-zA-Z0-9-]+)', filename)
+        if m_preset:
+            # Restore underscores that were replaced with hyphens at write time
+            info['mem_preset'] = m_preset.group(1).replace('-', '_')
     norm_m = re.search(r'_norm(ba|gd)', filename)
     if norm_m:
         info['norm_type'] = 'batchnorm' if norm_m.group(1) == 'ba' else 'gdn'
@@ -184,6 +190,24 @@ def _detect_fno(encoder_file: str) -> bool:
         return isinstance(payload, dict) and payload.get('_fno', False)
     except Exception:
         return False
+
+
+def _detect_multi_embedding(encoder_file: str) -> bool:
+    try:
+        payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+        return isinstance(payload, dict) and bool(payload.get('_multi_embedding', False))
+    except Exception:
+        return False
+
+
+def _read_multi_embedding_branches(encoder_file: str):
+    try:
+        payload = torch.load(encoder_file, map_location='cpu', weights_only=False)
+        if isinstance(payload, dict) and payload.get('_multi_embedding'):
+            return payload.get('branches', None)
+    except Exception:
+        pass
+    return None
 
 
 def _detect_vae(encoder_file: str) -> bool:
@@ -297,11 +321,23 @@ def load_rom_model(model_entry: Dict, device: torch.device) -> Tuple[ROMWithE2C,
         rom_config.config.setdefault('encoder', {})['norm_type'] = info['norm_type']
         rom_config.config.setdefault('decoder', {})['norm_type'] = info['norm_type']
 
+    is_mem = info.get('multi_embedding', _detect_multi_embedding(model_entry['encoder']))
     is_gnn = info.get('gnn', _detect_gnn(model_entry['encoder']))
     is_fno = info.get('fno', _detect_fno(model_entry['encoder']))
     is_mm = info.get('multimodal', _detect_multimodal(model_entry['encoder']))
 
-    if is_gnn:
+    if is_mem:
+        # Multi-embedding multimodal takes priority and forces every other
+        # backbone flag off. Always 4-channel by construction.
+        is_gnn = False
+        is_fno = False
+        is_mm = False
+        n_channels = 4
+        rom_config.model['n_channels'] = n_channels
+        if 'data' in rom_config.config and 'input_shape' in rom_config.config['data']:
+            if isinstance(rom_config.config['data']['input_shape'], list):
+                rom_config.config['data']['input_shape'][0] = n_channels
+    elif is_gnn:
         is_mm = False
         is_fno = False
         n_channels = 4
@@ -317,10 +353,23 @@ def load_rom_model(model_entry: Dict, device: torch.device) -> Tuple[ROMWithE2C,
             if isinstance(rom_config.config['data']['input_shape'], list):
                 rom_config.config['data']['input_shape'][0] = n_channels
 
+    rom_config.config.setdefault('multi_embedding', {})['enable'] = is_mem
     rom_config.config.setdefault('gnn', {})['enable'] = is_gnn
     rom_config.config.setdefault('fno', {})['enable'] = is_fno
     rom_config.config.setdefault('multimodal', {})['enable'] = is_mm
-    if is_mm or is_fno:
+    if is_mem:
+        # Pull branch metadata from the encoder payload so the model can
+        # rebuild the right per-branch encoders/decoders.
+        branches = _read_multi_embedding_branches(model_entry['encoder'])
+        if branches:
+            rom_config.config['multi_embedding']['branches'] = branches
+            # latent_dim must equal sum of branch latent_dims
+            rom_config.model['latent_dim'] = sum(int(b.get('latent_dim', 0)) for b in branches)
+            if any(b.get('encoder', {}).get('type') == 'fno'
+                   or (b.get('decoder') and b['decoder'].get('type') == 'fno')
+                   for b in branches):
+                rom_config.config.setdefault('loss', {})['enable_invertibility_loss'] = True
+    elif is_mm or is_fno:
         ld = rom_config.model.get('latent_dim', 128)
         sld = rom_config.config['multimodal'].get('static_latent_dim', 32)
         rom_config.config['multimodal']['dynamic_latent_dim'] = ld - sld
