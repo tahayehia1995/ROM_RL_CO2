@@ -443,9 +443,13 @@ class TestingDashboard:
                         else:
                             encoding = 'Standard'
 
+                        # Pretrained warm-start marker (added to filename
+                        # by grid_search_training when use_pretrained=True).
+                        pt_suffix = ' | PT' if ('_pt_' in run_id or run_id.endswith('_pt')) else ''
+
                         label = (f"{transition} | {encoding} | "
                                 f"ld={model_set['latent_dim']}, ns={model_set['n_steps']}, "
-                                f"bs={model_set['batch_size']}{n_channels_str}")
+                                f"bs={model_set['batch_size']}{n_channels_str}{pt_suffix}")
                         options.append((label, model_set))
                     
                     self.model_selection.options = options
@@ -469,8 +473,9 @@ class TestingDashboard:
                             enc = 'MM'
                         else:
                             enc = 'Std'
+                        pt_suffix = ' | PT' if ('_pt_' in run_id or run_id.endswith('_pt')) else ''
                         print(f"   {transition} | {enc} | ld={model_set['latent_dim']}, "
-                              f"ns={model_set['n_steps']}, bs={model_set['batch_size']}{n_channels_str}, "
+                              f"ns={model_set['n_steps']}, bs={model_set['batch_size']}{n_channels_str}{pt_suffix}, "
                               f"transition={transition_status}")
                 else:
                     self.model_selection.options = [("No models found", None)]

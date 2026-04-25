@@ -110,10 +110,10 @@ HYPERPARAMETER_GRID = {
     'enable_inactive_masking': [True],      # Enable inactive cell masking
     
     # Multimodal (two-branch fused encoder) - requires n_channels=4
-    'enable_multimodal': [False],           # Separate static (PERMI/POROS) from dynamic (SG/PRES) branches. Must be False if enable_gnn is True
+    'enable_multimodal': [True],           # Separate static (PERMI/POROS) from dynamic (SG/PRES) branches. Must be False if enable_gnn is True
     
     # GNN (Graph Neural Network encoder/decoder) - requires n_channels=4, torch_geometric
-    'enable_gnn':[True],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
+    'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
     # FNO (Fourier Neural Operator encoder/decoder) - invertible spectral convolution, requires n_channels=4
     'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
@@ -126,7 +126,7 @@ HYPERPARAMETER_GRID = {
     'mem_branches_preset': ['cnn_sg__fno_pres'],    # Named preset (see MEM_PRESETS below)
     
     # Transition model type
-    'transition_type': ['Linear'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
+    'transition_type': ['mamba_2'],        # Options: 's4d', 's4d_dplr', 's5', 'koopman', 'ct_koopman', 'clru', 'linear', 'nonlinear', 'mamba', 'mamba2', 'stable_koopman', 'deep_koopman', 'gru', 'lstm', 'hamiltonian', 'skolr', 'ren', 'koopman_aft', 'dissipative_koopman', 'bilinear_koopman', 'isfno', 'sindy', 'neural_cde', 'latent_sde', 'transformer', 'deeponet'
     
     # Encoder enhancement strategies (reduce re-encoding error accumulation)
     'enable_jacobian_loss': [False],      # Contractive encoder via Jacobian regularization
@@ -142,8 +142,8 @@ HYPERPARAMETER_GRID = {
     # and/or (transition) match.  If any component is warm-started the run
     # uses the reduced ``pretrained_epoch`` budget; otherwise it falls back
     # to from-scratch training with the full ``epoch`` budget.
-    'use_pretrained':   [False],
-    'pretrained_epoch': [50],
+    'use_pretrained':   [True],
+    'pretrained_epoch': [250],
 }
 
 # Multi-embedding multimodal presets. Each entry is a list of branch specs in

@@ -41,7 +41,7 @@ data:
 # ============================================================================
 # Minimal training section - RL training uses rl_model.training instead
 training:
-  epoch: 200           # Not used in RL, but required for Config validation
+  epoch: 400           # Not used in RL, but required for Config validation
   batch_size: 16       # Not used in RL, but required for Config validation
   learning_rate: 0.0001  # Not used in RL, but required for Config validation
   nsteps: 2            # Not used in RL, but required for Config validation

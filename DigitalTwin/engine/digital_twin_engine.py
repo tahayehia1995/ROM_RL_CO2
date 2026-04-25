@@ -234,6 +234,10 @@ class DigitalTwinEngine:
             m = re.search(r"run(\d+)", enc_name)
             if m:
                 label = f"Run {m.group(1)} | {label}"
+            # Pretrained warm-start marker (added to filename by
+            # grid_search_training when use_pretrained=True).
+            if "_pt_" in fname_lower or fname_lower.endswith("_pt.h5"):
+                label = f"{label} | PT"
 
             results.append({
                 "label": label,

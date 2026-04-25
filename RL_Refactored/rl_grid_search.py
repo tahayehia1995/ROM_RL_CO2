@@ -144,6 +144,10 @@ def _parse_model_filename(filename: str) -> Dict:
     trn_m = re.search(r'_trn([A-Z]+)', filename)
     if trn_m:
         info['transition_type'] = trn_m.group(1).lower()
+    # Pretrained warm-start marker (added to filename by
+    # grid_search_training when use_pretrained=True).
+    if '_pt_' in filename or filename.endswith('_pt.h5'):
+        info['pretrained'] = True
     return info
 
 
@@ -161,6 +165,10 @@ def _model_display_name(filename: str, info: Dict) -> str:
         parts.append(f"ch={info['channels']}")
     if 'run' in info:
         parts.append(f"run={info['run']}")
+    # Pretrained warm-start marker (added to filename by
+    # grid_search_training when use_pretrained=True).
+    if info.get('pretrained') or '_pt_' in filename or filename.endswith('_pt.h5'):
+        parts.append("PT")
     return f"Model ({', '.join(parts)})" if parts else filename
 
 

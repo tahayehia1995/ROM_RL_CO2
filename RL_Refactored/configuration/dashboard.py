@@ -1349,6 +1349,11 @@ class RLConfigurationDashboard:
         if ch is not None:
             parts.append(f"ch={ch}")
 
+        # Pretrained warm-start marker (added to filename by
+        # grid_search_training when use_pretrained=True).
+        if model_info.get('pretrained') or '_pt_' in filename or filename.endswith('_pt.h5'):
+            parts.append('PT')
+
         return ' | '.join(parts)
     
     def _parse_model_filename(self, filename):
@@ -1446,7 +1451,12 @@ class RLConfigurationDashboard:
             trn_match = re.search(r'_trn([A-Z0-9_]+)', filename)
         if trn_match:
             info['transition_type'] = trn_match.group(1).lower()
-        
+
+        # Pretrained warm-start marker (added to filename by
+        # grid_search_training when use_pretrained=True).
+        if '_pt_' in filename or filename.endswith('_pt.h5'):
+            info['pretrained'] = True
+
         return info
     
     def _scan_available_states(self):

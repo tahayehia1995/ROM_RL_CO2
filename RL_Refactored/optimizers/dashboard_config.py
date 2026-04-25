@@ -1032,7 +1032,12 @@ class OptimizerConfigDashboard:
         trn_match = re.search(r'_trn([A-Z0-9_]+)', filename)
         if trn_match:
             info['transition_type'] = trn_match.group(1).lower()
-        
+
+        # Pretrained warm-start marker (added to filename by
+        # grid_search_training when use_pretrained=True).
+        if '_pt_' in filename or filename.endswith('_pt.h5'):
+            info['pretrained'] = True
+
         return info
     
     def _create_model_display_name(self, filename: str, info: Dict) -> str:
@@ -1057,6 +1062,11 @@ class OptimizerConfigDashboard:
             parts.append(f"bs={info['batch_size']}")
         if 'channels' in info:
             parts.append(f"ch={info['channels']}")
+
+        # Pretrained warm-start marker (added to filename by
+        # grid_search_training when use_pretrained=True).
+        if info.get('pretrained') or '_pt_' in filename or filename.endswith('_pt.h5'):
+            parts.append('PT')
 
         return ' | '.join(parts)
     

@@ -44,7 +44,7 @@ model:
   sigma: 0.0
   enable_vae: false
 multimodal:
-  enable: false
+  enable: true
   static_latent_dim: 32
   dynamic_latent_dim: 96
   static_channels:
@@ -54,7 +54,7 @@ multimodal:
   - 0
   - 1
 gnn:
-  enable: true
+  enable: false
   conv_type: gine
   max_sub_batch: 32
   torch_compile: false
