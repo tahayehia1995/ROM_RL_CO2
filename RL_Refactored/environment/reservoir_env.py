@@ -447,10 +447,18 @@ class ReservoirEnvironment(object):
                 # Structure: [Injector_BHP(3), Gas_production(3), Water_production(3)] = 9 observations
                 dummy_obs = torch.zeros(self.current_spatial_state.shape[0], 9).to(self.device)
                 
-                # 🎓 EXACT TRAINING DASHBOARD INPUTS: (spatial_state, controls, observations, dt)
-                inputs = (self.current_spatial_state, action, dummy_obs, self.dt)
-                
-                
+                # 🎓 EXACT TRAINING DASHBOARD INPUTS: (spatial_state, controls, observations, dt[, case_indices])
+                # ``case_indices`` is the 5th tuple slot (when supported by
+                # the underlying model) and lets the static cache use the
+                # realization-keyed fast path -- one per-step encode is
+                # avoided for every realization-equivalent rollout.
+                _case_idx_t = torch.tensor(
+                    [int(self._last_case_idx)],
+                    dtype=torch.long, device=self.device,
+                )
+                inputs = (self.current_spatial_state, action, dummy_obs,
+                          self.dt, _case_idx_t)
+
                 next_spatial_state, yobs = self.rom.predict(inputs)
                 
                 # Store raw output for next iteration (no clamp — matches ROM
@@ -460,8 +468,14 @@ class ReservoirEnvironment(object):
                 # Encode next spatial state to latent (for RL state representation)
                 with torch.no_grad():
                     if hasattr(self.rom.model, 'encode_initial'):
-                        # GNN / Multimodal: unified encode_initial
-                        self.state = self.rom.model.encode_initial(next_spatial_state)
+                        # GNN / Multimodal: unified encode_initial; pass
+                        # case_indices when the signature accepts them.
+                        try:
+                            self.state = self.rom.model.encode_initial(
+                                next_spatial_state, case_indices=_case_idx_t
+                            )
+                        except TypeError:
+                            self.state = self.rom.model.encode_initial(next_spatial_state)
                     else:
                         encoder_output = self.rom.model.encoder(next_spatial_state)
                         if isinstance(encoder_output, tuple):

@@ -1756,6 +1756,10 @@ class DataPreprocessingDashboard:
         import timeit
         start = timeit.default_timer()
         
+        # Realization-aware static cache fast path: pass case_indices on
+        # every predict() so the static encoder is reused across steps.
+        _case_idx_t = torch.as_tensor(np.asarray(test_case_indices), dtype=torch.long)
+
         for i_tstep in range(num_tstep):
             # Store current state prediction
             state_pred[:, i_tstep, ...] = state_t_seq
@@ -1763,8 +1767,10 @@ class DataPreprocessingDashboard:
             # Time step for current iteration
             dt_seq = torch.tensor(np.ones((num_case, 1)) * indt_del[i_tstep], dtype=torch.float32).to(device)
             
-            # Prepare inputs for model
-            inputs = (state_t_seq, bhp_seq[:, :, i_tstep], yobs_t_seq[:, :, i_tstep], dt_seq)
+            # Prepare inputs for model (case_indices in 5th slot enables
+            # the realization-keyed static cache fast path).
+            inputs = (state_t_seq, bhp_seq[:, :, i_tstep],
+                      yobs_t_seq[:, :, i_tstep], dt_seq, _case_idx_t)
             
             # Predict next state
             state_t1_seq, yobs_t1_seq = my_rom.predict(inputs)
@@ -2075,6 +2081,9 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
     import timeit
     start = timeit.default_timer()
     
+    # case_indices for the realization-aware static cache fast path.
+    _case_idx_t = torch.as_tensor(np.asarray(test_case_indices), dtype=torch.long)
+
     for i_tstep in range(num_tstep):
         # Store current state prediction
         state_pred[:, i_tstep, ...] = state_t_seq
@@ -2082,8 +2091,10 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
         # Time step for current iteration
         dt_seq = torch.tensor(np.ones((num_case, 1)) * indt_del[i_tstep], dtype=torch.float32).to(device)
         
-        # Prepare inputs for model
-        inputs = (state_t_seq, bhp_seq[:, :, i_tstep], yobs_t_seq[:, :, i_tstep], dt_seq)
+        # Prepare inputs for model (5-tuple with case_indices enables
+        # the realization-keyed static cache fast path).
+        inputs = (state_t_seq, bhp_seq[:, :, i_tstep],
+                  yobs_t_seq[:, :, i_tstep], dt_seq, _case_idx_t)
         
         # Predict next state
         state_t1_seq, yobs_t1_seq = my_rom.predict(inputs)

@@ -27,6 +27,8 @@ try:
 except ImportError:
     TORCH_GEOMETRIC_AVAILABLE = False
 
+from model.utils.realization_cache import identify_realizations_from_arrays
+
 
 NEIGHBOR_OFFSETS = [
     (-1, 0, 0), (1, 0, 0),
@@ -127,52 +129,23 @@ def build_graph_from_grid(
             edge_attr[:, 0] = trans_col / t_max
 
     # --- Static node features ---
-    # Collect well info
+    # NOTE: The hybrid GNN uses a 3D CNN (not the GNN) for the static
+    # branch, so the per-node static feature matrix that the legacy
+    # GNNStaticEncoder consumed is no longer built here.  We keep the
+    # field present in ``GraphStructure`` for schema stability (and to
+    # avoid breaking any external consumer that asks for ``.shape[0]``)
+    # but populate it with a length-0 tensor.
+    #
+    # The dynamic GNN now reads PERMI and POROS *directly* from the
+    # globally-normalised processed tensor (same source as SG/PRES), so
+    # any per-realization renormalization of geology done here would
+    # introduce a value-scale mismatch.  We therefore deliberately do
+    # NOT renormalise PERMI / POROS in this builder anymore.
     all_injectors = well_locations.get('injectors', {})
     all_producers = well_locations.get('producers', {})
     num_wells = len(all_injectors) + len(all_producers)
 
-    static_feats = []
-    for node_id, (i, j, k) in enumerate(active_indices):
-        perm_val = float(permi[i, j, k])
-        poro_val = float(poros[i, j, k])
-
-        is_inj = 0.0
-        is_prod = 0.0
-        well_id = np.zeros(max(num_wells, 1), dtype=np.float32)
-
-        well_idx = 0
-        for wname, coords in sorted(all_injectors.items()):
-            wx, wy = coords[0], coords[1]
-            if i == wx and j == wy:
-                is_inj = 1.0
-                well_id[well_idx] = 1.0
-            well_idx += 1
-        for wname, coords in sorted(all_producers.items()):
-            wx, wy = coords[0], coords[1]
-            if i == wx and j == wy:
-                is_prod = 1.0
-                well_id[well_idx] = 1.0
-            well_idx += 1
-
-        feat = np.concatenate([
-            [perm_val, poro_val, is_inj, is_prod],
-            well_id,
-        ])
-        static_feats.append(feat)
-
-    static_node_features = torch.tensor(
-        np.array(static_feats), dtype=torch.float32
-    )
-
-    # Normalize PERMI and POROS columns within this realization
-    for col in [0, 1]:
-        col_data = static_node_features[:, col]
-        c_min, c_max = col_data.min(), col_data.max()
-        if c_max > c_min:
-            static_node_features[:, col] = (col_data - c_min) / (c_max - c_min)
-        else:
-            static_node_features[:, col] = 0.0
+    static_node_features = torch.zeros((N_active, 0), dtype=torch.float32)
 
     # --- Node positions (normalized 0-1) ---
     node_positions = torch.tensor(active_indices, dtype=torch.float32)
@@ -329,24 +302,14 @@ class GraphManager:
     def _identify_realizations(
         masks: np.ndarray, permi: np.ndarray, num_cases: int
     ) -> Tuple[List[int], np.ndarray]:
-        """Group cases by unique (mask, permi) combinations."""
-        case_to_real = np.zeros(num_cases, dtype=np.int64)
-        representative_cases = [0]
-        case_to_real[0] = 0
+        """Group cases by unique (mask, permi) combinations.
 
-        for c in range(1, num_cases):
-            found = False
-            for r_idx, rep in enumerate(representative_cases):
-                if (np.array_equal(masks[c], masks[rep]) and
-                        np.allclose(permi[c], permi[rep], rtol=1e-5)):
-                    case_to_real[c] = r_idx
-                    found = True
-                    break
-            if not found:
-                case_to_real[c] = len(representative_cases)
-                representative_cases.append(c)
-
-        return representative_cases, case_to_real
+        Thin wrapper around :func:`model.utils.realization_cache.identify_realizations_from_arrays`
+        so the GNN's realization definition stays in lock-step with the
+        shared :class:`RealizationCache` used by Multimodal and
+        MultiEmbedding.
+        """
+        return identify_realizations_from_arrays(masks, permi, num_cases)
 
     def get_realization(self, case_idx: int) -> int:
         """Map a case index to its realization index."""

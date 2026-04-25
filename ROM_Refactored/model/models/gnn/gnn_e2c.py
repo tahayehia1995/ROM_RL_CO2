@@ -1,14 +1,27 @@
 """
-GNN Embed-to-Control Model
-============================
-Drop-in replacement for MultimodalMSE2C that uses Graph Neural Networks
-instead of 3D CNNs for encoding and decoding spatial reservoir states.
+Hybrid GNN Embed-to-Control Model (CNN static + GNN dynamic)
+=============================================================
+Drop-in replacement for MultimodalMSE2C with one of the two encoders
+upgraded to a Graph Neural Network.
+
+Architecture:
+- Static branch: 3D CNN ``Encoder`` (identical to MultimodalMSE2C) over
+  ``(B, len(static_channels), Nx, Ny, Nz)`` -> ``z_static``.  Routed
+  through the shared :class:`RealizationCache` keyed by
+  ``case_to_realization`` (efficient path) for realization-level reuse.
+- Dynamic branch: GNN over per-active-node features
+  ``[SG, PRES, PERMI, POROS, is_inj, is_prod, well_one_hot, control]``
+  followed by GridPooling (scatter -> Conv3D -> Linear) -> ``z_dynamic``.
+  Geology is now locally available at every message-passing step.
 
 Key features:
-- Well indicators + control values injected as dynamic node features
-- GridPooling: scatter GNN embeddings back to 3D grid for CNN-compatible latent
-- Well-node readout: auxiliary observation predictions from well node embeddings
-- Memory-efficient batching by realization
+- CNN static encoder shares weight-I/O conventions with the multimodal
+  family; cache thrashing avoided via ``RealizationCache``.
+- Vectorised control injection (single scatter, no Python loop).
+- Vectorised well-node readout (no per-sample / per-well loop).
+- Memory-efficient dynamic batching by realization.
+
+Requires: torch_geometric (PyG)
 """
 
 import torch
@@ -16,15 +29,17 @@ import torch.nn as nn
 
 from torch_geometric.nn import global_mean_pool
 
+from model.models.encoder import Encoder
 from model.models.transition_utils import create_trans_encoder
 from model.utils.initialization import weights_init
 from model.utils import win_long_path
+from model.utils.realization_cache import RealizationCache
 
 from model.multimodal_approach import _build_branch_config, _ConfigProxy
 from model.models.decoder import Decoder
 
 from .graph_construction import GraphManager
-from .gnn_encoder import GNNStaticEncoder, GNNDynamicEncoder
+from .gnn_encoder import GNNDynamicEncoder
 
 
 class _ConditionedLinearTransition(nn.Module):
@@ -193,14 +208,22 @@ class GNNE2C(nn.Module):
         num_wells = num_inj + num_prod
         self.num_inj = num_inj
         self.num_prod = num_prod
-        static_feat_dim = 4 + max(num_wells, 1)
 
-        # Dynamic encoder input: SG + PRES + is_inj + is_prod + well_one_hot + control
+        # Dynamic encoder per-node features:
+        # [dynamic spatial channels, static spatial channels (geology),
+        #  is_inj, is_prod, well_one_hot, control]
+        # Geology (PERMI/POROS) is now per-node so the GNN's message
+        # passing has direct local access to it at every layer.
         n_dyn_channels = len(self.dynamic_channels)
+        n_static_channels = len(self.static_channels)
         n_well_indicator_cols = 2 + num_wells + 1  # is_inj, is_prod, well_ids, control
-        dyn_in_channels = n_dyn_channels + n_well_indicator_cols
+        dyn_in_channels = n_dyn_channels + n_static_channels + n_well_indicator_cols
         self._n_dyn_channels = n_dyn_channels
+        self._n_static_channels = n_static_channels
         self._n_well_indicator_cols = n_well_indicator_cols
+        # Combined channel slice into the full reservoir tensor used by
+        # the dynamic encoder (dynamic first, then static).
+        self._dyn_input_channels = list(self.dynamic_channels) + list(self.static_channels)
 
         # Build well name → control index mapping
         # Control order from training data: BHP[P1,P2,P3], GASRATSC[I1,I2,I4]
@@ -214,16 +237,17 @@ class GNNE2C(nn.Module):
             self._well_control_map[wname] = i  # BHP is first
         self._well_order = inj_names + prod_names
 
-        self.static_encoder = GNNStaticEncoder(
-            in_channels=static_feat_dim,
-            latent_dim=self.static_latent_dim,
-            hidden_dim=enc_cfg.get('hidden_dim', 32),
-            num_layers=enc_cfg.get('num_layers', 3),
-            heads=enc_cfg.get('num_heads', 2),
-            edge_dim=7,
-            dropout=enc_cfg.get('dropout', 0.1),
-            conv_type=conv_type,
+        # --- Static encoder: CNN, identical to MultimodalMSE2C's ---
+        # Reads (B, n_static_channels, Nx, Ny, Nz) and produces z_static.
+        # The global ``encoder:`` block in config.yaml drives this CNN
+        # (the same block multimodal uses).
+        static_cfg_dict = _build_branch_config(
+            config, n_static_channels, self.static_latent_dim
         )
+        static_proxy = _ConfigProxy(static_cfg_dict, config)
+        self.static_encoder = Encoder(static_proxy)
+
+        # --- Dynamic encoder: GNN with geology-augmented per-node feats ---
         self.dynamic_encoder = GNNDynamicEncoder(
             in_channels=dyn_in_channels,
             latent_dim=self.dynamic_latent_dim,
@@ -263,8 +287,10 @@ class GNNE2C(nn.Module):
                 except ImportError:
                     _can_compile = False
             if _can_compile:
+                # Only the dynamic GNN benefits from torch.compile; the
+                # static branch is a stock CNN whose backend is already
+                # cuDNN-optimised.
                 try:
-                    self.static_encoder.gnn = torch.compile(self.static_encoder.gnn)
                     self.dynamic_encoder.gnn = torch.compile(self.dynamic_encoder.gnn)
                 except Exception:
                     pass
@@ -311,34 +337,78 @@ class GNNE2C(nn.Module):
         self.discriminator = None
 
         self._max_sub_batch = gnn_cfg.get('max_sub_batch', 16)
-        self._cached_z_static = {}
+
+        # Shared multi-entry, realization-keyed static cache.  Identical
+        # behaviour to the cache used by Multimodal and MultiEmbedding.
+        self._z_static_cache = RealizationCache(
+            maxlen=max(64, self.graph_manager.num_realizations + 8)
+        )
+
+        # Cached PyG mini-batch tensors for the dynamic GNN, keyed by
+        # (realization_id, count).
         self._batched_graph_cache = {}
+
+        # Vectorised control-injection / well-readout precomputed buffers,
+        # keyed by realization_id.  Built lazily on first dynamic forward.
+        self._well_inject_cache = {}
+        self._well_readout_cache = {}
 
         self.well_readout_lambda = gnn_cfg.get('well_readout_lambda', 1.0)
 
         if config.runtime.get('verbose', False):
             total_params = sum(p.numel() for p in self.parameters())
             conv_label = 'GINEConv (fast)' if conv_type == 'gine' else 'GATv2Conv (attention)'
-            print(f"GNN E2C: {self.graph_manager.num_realizations} realizations, "
-                  f"z_static={self.static_latent_dim}, "
-                  f"z_dynamic={self.dynamic_latent_dim}, "
+            print(f"Hybrid GNN E2C: {self.graph_manager.num_realizations} realizations, "
+                  f"z_static={self.static_latent_dim} (CNN), "
+                  f"z_dynamic={self.dynamic_latent_dim} (GNN), "
                   f"conv={conv_label}, "
-                  f"dyn_in={dyn_in_channels} (SG,PRES + well_ind + ctrl), "
+                  f"dyn_in={dyn_in_channels} "
+                  f"(dyn={n_dyn_channels}+geo={n_static_channels}+well_ind+ctrl), "
                   f"pooling=GridPooling, "
-                  f"well_readout=True, "
+                  f"well_readout=True (vectorised), "
                   f"total params={total_params:,}")
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
+    def set_case_to_realization(self, mapping):
+        """Override the ``GraphManager``'s case-to-realization mapping.
+
+        Most callers do NOT need this: the GNN already builds and uses
+        ``GraphManager.case_to_realization`` automatically.  Provided
+        for API symmetry with :class:`MultimodalMSE2C` and
+        :class:`MultiEmbeddingMultimodal` so the same caller code can
+        run against any of the three model families.
+
+        Pass ``None`` to revert to the GraphManager's mapping.
+        """
+        # The GNN sources its mapping from the GraphManager; allow an
+        # external override but invalidate the static cache when it
+        # changes.
+        if mapping is not None:
+            # Replace the GraphManager's case_to_realization in-place
+            # so downstream `_get_real_ids` calls see the new mapping
+            # without any other code changes.
+            self.graph_manager.case_to_realization = mapping
+        self._z_static_cache.clear()
+
     def _get_real_ids(self, case_indices, B, device):
+        """Per-sample realization id tensor.  Falls back to all-zeros
+        when ``case_indices`` is None (single-realization assumption,
+        same as the legacy behaviour)."""
         if case_indices is None:
             return torch.zeros(B, dtype=torch.long, device=device)
         return torch.tensor(
             [self.graph_manager.get_realization(int(ci)) for ci in case_indices],
             dtype=torch.long, device=device,
         )
+
+    def _realization_keys_from_real_ids(self, real_ids):
+        """Convert a (B,) real_ids tensor into a Python list of keys
+        suitable for :class:`RealizationCache`.
+        """
+        return [int(r) for r in real_ids]
 
     def _group_by_realization(self, real_ids):
         groups = {}
@@ -349,9 +419,6 @@ class GNNE2C(nn.Module):
             groups[r].append(b)
         return {r: torch.tensor(indices, dtype=torch.long, device=real_ids.device)
                 for r, indices in groups.items()}
-
-    def _invalidate_static_cache(self):
-        self._cached_z_static.clear()
 
     def _get_cached_batched_graph(self, gs, r, count, device):
         key = (r, count)
@@ -368,30 +435,120 @@ class GNNE2C(nn.Module):
             )
         return self._batched_graph_cache[key]
 
-    # ------------------------------------------------------------------
-    # Static encoding (unchanged)
-    # ------------------------------------------------------------------
+    def _get_well_inject_buffers(self, r, gs, device):
+        """Return precomputed (well_node_ids, well_ctrl_indices) tensors
+        for vectorised control injection at well perforations.
 
-    def _encode_static_grouped(self, real_ids, B, device):
-        if self.training:
-            self._invalidate_static_cache()
+        Built once per realization, cached on ``self._well_inject_cache``.
+        """
+        if r in self._well_inject_cache:
+            return self._well_inject_cache[r]
 
-        z_static = torch.empty(B, self.static_latent_dim, device=device)
-        groups = self._group_by_realization(real_ids)
+        node_ids = []
+        ctrl_indices = []
+        for wname in self._well_order:
+            winfo = gs.well_node_indices.get(wname)
+            if winfo is None:
+                continue
+            ctrl_idx = self._well_control_map[wname]
+            for nid in winfo['node_ids']:
+                node_ids.append(int(nid))
+                ctrl_indices.append(int(ctrl_idx))
 
-        for r, indices in groups.items():
-            if r in self._cached_z_static:
-                z_r = self._cached_z_static[r]
+        if node_ids:
+            node_ids_t = torch.tensor(node_ids, dtype=torch.long, device=device)
+            ctrl_idx_t = torch.tensor(ctrl_indices, dtype=torch.long, device=device)
+        else:
+            node_ids_t = torch.zeros(0, dtype=torch.long, device=device)
+            ctrl_idx_t = torch.zeros(0, dtype=torch.long, device=device)
+        self._well_inject_cache[r] = (node_ids_t, ctrl_idx_t)
+        return self._well_inject_cache[r]
+
+    def _get_well_readout_buffers(self, r, gs, device):
+        """Return precomputed padded ``(num_wells, max_perfs)`` index +
+        mask tensors used for batched well-node readout pooling.
+
+        Wells with zero perforations contribute an all-zero mean (the
+        mask sums clamp at 1 to avoid division by zero).
+        """
+        if r in self._well_readout_cache:
+            return self._well_readout_cache[r]
+
+        per_well_ids = []
+        for wname in self._well_order:
+            winfo = gs.well_node_indices.get(wname)
+            if winfo and len(winfo['node_ids']) > 0:
+                per_well_ids.append([int(n) for n in winfo['node_ids']])
             else:
-                gs = self.graph_manager.get_graph(r)
-                h = self.static_encoder.gnn(
-                    gs.static_node_features, gs.edge_index, edge_attr=gs.edge_attr
-                )
-                z_r = self.static_encoder.pool(h)
-                self._cached_z_static[r] = z_r.detach()
+                per_well_ids.append([])
 
-            z_static[indices] = z_r.unsqueeze(0).expand(len(indices), -1)
+        max_perfs = max((len(ids) for ids in per_well_ids), default=0)
+        num_wells = len(per_well_ids)
 
+        if max_perfs == 0:
+            idx_padded = torch.zeros(num_wells, 1, dtype=torch.long, device=device)
+            valid_mask = torch.zeros(num_wells, 1, dtype=torch.float32, device=device)
+        else:
+            idx_padded = torch.zeros(num_wells, max_perfs, dtype=torch.long, device=device)
+            valid_mask = torch.zeros(num_wells, max_perfs, dtype=torch.float32, device=device)
+            for w_i, ids in enumerate(per_well_ids):
+                if len(ids) > 0:
+                    idx_padded[w_i, :len(ids)] = torch.tensor(
+                        ids, dtype=torch.long, device=device
+                    )
+                    valid_mask[w_i, :len(ids)] = 1.0
+
+        self._well_readout_cache[r] = (idx_padded, valid_mask)
+        return self._well_readout_cache[r]
+
+    # ------------------------------------------------------------------
+    # Static encoding (CNN + realization-aware cache)
+    # ------------------------------------------------------------------
+
+    def _encode_static_grouped(self, x_full, real_ids, B, device):
+        """Encode static channels via a 3D CNN, with realization-keyed
+        multi-entry caching.
+
+        Args:
+            x_full: (B, C, Nx, Ny, Nz) full reservoir state.  Static
+                    channels are sliced internally.
+            real_ids: (B,) int64 realization indices used as cache keys
+                      (efficient path; matches the GNN's existing
+                      per-realization grouping).
+            B: batch size.
+            device: torch device.
+
+        Returns:
+            z_static: (B, static_latent_dim) tensor.
+        """
+        x_static = x_full[:, self.static_channels, :, :, :]
+
+        if self.training:
+            self._z_static_cache.clear()
+            return self.static_encoder(x_static)[0]
+
+        keys = self._realization_keys_from_real_ids(real_ids)
+        z_static, miss_idx, miss_keys = self._z_static_cache.lookup(
+            keys, self.static_latent_dim, device, dtype=x_static.dtype
+        )
+        if miss_idx.numel() > 0:
+            x_miss = x_static.index_select(0, miss_idx)
+            z_miss = self.static_encoder(x_miss)[0]
+            z_static.index_copy_(0, miss_idx, z_miss)
+            # Deduplicate keys: a single inference batch can include
+            # multiple samples from the same realization, so pair the
+            # *first* per-key encoded latent with each unique key.
+            seen = {}
+            unique_keys = []
+            unique_z = []
+            for i, k in enumerate(miss_keys):
+                if k in seen:
+                    continue
+                seen[k] = True
+                unique_keys.append(k)
+                unique_z.append(z_miss[i])
+            if unique_keys:
+                self._z_static_cache.store(unique_keys, torch.stack(unique_z, dim=0))
         return z_static
 
     # ------------------------------------------------------------------
@@ -401,8 +558,13 @@ class GNNE2C(nn.Module):
     def _encode_dynamic_grouped(self, grid_tensor, real_ids, B, device,
                                 controls=None):
         """
-        Encode dynamic features with well indicators, controls, GridPooling,
-        and well-node readout.
+        Encode dynamic features with geology, well indicators, controls,
+        GridPooling, and (vectorised) well-node readout.
+
+        Per-node feature layout (in order):
+            [dynamic spatial channels (SG, PRES),
+             static spatial channels (PERMI, POROS),
+             is_inj, is_prod, well_one_hot, control]
 
         Args:
             grid_tensor: (B, C, Nx, Ny, Nz)
@@ -416,7 +578,11 @@ class GNNE2C(nn.Module):
             y_well_aux: (B, n_obs) or None — auxiliary well observation predictions
         """
         z_dynamic = torch.empty(B, self.dynamic_latent_dim, device=device)
-        y_well_list = [] if controls is not None else None
+        collect_well_readout = controls is not None
+        y_well_aux = None
+        if collect_well_readout:
+            n_obs = self.num_inj + self.num_prod * 2
+            y_well_aux = torch.zeros(B, n_obs, device=device)
         groups = self._group_by_realization(real_ids)
         hidden_dim = self.dynamic_encoder.hidden_dim
         Nx, Ny, Nz = self.grid_shape
@@ -430,31 +596,36 @@ class GNNE2C(nn.Module):
                 chunk_idx = indices[chunk_start:chunk_start + self._max_sub_batch]
                 count = len(chunk_idx)
 
-                # Extract SG, PRES at active nodes
+                # Extract dynamic + static (geology) channels at active nodes
+                # in one gather.  Channel order:
+                # [dynamic_channels..., static_channels...]
                 sub_grid = grid_tensor[chunk_idx]
-                dyn_feats = sub_grid[:, self.dynamic_channels][
+                dyn_feats = sub_grid[:, self._dyn_input_channels][
                     :, :, coords[:, 0], coords[:, 1], coords[:, 2]
-                ]  # (count, n_dyn_ch, N)
-                dyn_feats = dyn_feats.permute(0, 2, 1)  # (count, N, n_dyn_ch)
+                ]  # (count, n_dyn+n_stat, N)
+                dyn_feats = dyn_feats.permute(0, 2, 1)  # (count, N, n_dyn+n_stat)
 
                 # Append well indicators (is_inj, is_prod, well_ids, control=0)
                 well_ind = gs.well_indicator_features.unsqueeze(0).expand(
                     count, N, -1
                 ).clone()  # (count, N, n_well_indicator_cols)
 
-                # Inject control values at well nodes
+                # --- Vectorised control injection at well perforations ---
                 if controls is not None:
                     sub_controls = controls[chunk_idx]  # (count, u_dim)
-                    ctrl_col = self._n_well_indicator_cols - 1  # last column
-                    for wname in self._well_order:
-                        winfo = gs.well_node_indices.get(wname)
-                        if winfo is None:
-                            continue
-                        ctrl_idx = self._well_control_map[wname]
-                        for nid in winfo['node_ids']:
-                            well_ind[:, nid, ctrl_col] = sub_controls[:, ctrl_idx]
+                    well_node_ids, well_ctrl_idx = self._get_well_inject_buffers(
+                        r, gs, device
+                    )
+                    if well_node_ids.numel() > 0:
+                        ctrl_col = self._n_well_indicator_cols - 1
+                        # ctrl_vals: (count, total_well_nodes)
+                        ctrl_vals = sub_controls.index_select(1, well_ctrl_idx)
+                        # In-place scatter into the control column at the
+                        # right node ids.  Equivalent to the legacy
+                        # double-loop but a single op.
+                        well_ind[:, well_node_ids, ctrl_col] = ctrl_vals
 
-                # Concatenate: [SG, PRES, is_inj, is_prod, well_ids, control]
+                # Concatenate: [dyn, geo, is_inj, is_prod, well_ids, control]
                 flat_feats = torch.cat([dyn_feats, well_ind], dim=-1)
                 flat_feats = flat_feats.reshape(count * N, -1)
 
@@ -464,24 +635,24 @@ class GNNE2C(nn.Module):
                     flat_feats, edge_index, edge_attr=edge_attr
                 )  # (count * N, hidden_dim)
 
-                # --- Well-node readout (auxiliary observation prediction) ---
-                if y_well_list is not None:
-                    h_reshaped = h.view(count, N, hidden_dim)
-                    for s in range(count):
-                        h_per_well = []
-                        for wname in self._well_order:
-                            winfo = gs.well_node_indices.get(wname)
-                            if winfo and len(winfo['node_ids']) > 0:
-                                nids = winfo['node_ids']
-                                h_well = h_reshaped[s, nids, :].mean(dim=0)
-                            else:
-                                h_well = torch.zeros(hidden_dim, device=device)
-                            h_per_well.append(h_well)
-                        y_s = self.dynamic_encoder.well_readout(h_per_well)
-                        y_well_list.append((int(chunk_idx[s]), y_s))
+                h_reshaped = h.view(count, N, hidden_dim)
+
+                # --- Vectorised well-node readout ---
+                if collect_well_readout:
+                    idx_padded, valid_mask = self._get_well_readout_buffers(
+                        r, gs, device
+                    )
+                    # gather: (count, num_wells, max_perfs, hidden_dim)
+                    gathered = h_reshaped[:, idx_padded, :]
+                    mask = valid_mask.unsqueeze(0).unsqueeze(-1)  # (1, num_wells, max_perfs, 1)
+                    summed = (gathered * mask).sum(dim=2)
+                    counts = valid_mask.sum(dim=1).clamp(min=1.0)  # (num_wells,)
+                    well_pooled = summed / counts.view(1, -1, 1)
+                    # well_pooled: (count, num_wells, hidden_dim)
+                    y_chunk = self.dynamic_encoder.well_readout(well_pooled)
+                    y_well_aux[chunk_idx] = y_chunk
 
                 # --- GridPooling: scatter to grid → Conv3D → latent ---
-                h_reshaped = h.view(count, N, hidden_dim)
                 grid_3d = torch.zeros(
                     count, hidden_dim, Nx, Ny, Nz,
                     device=device, dtype=h.dtype
@@ -490,14 +661,6 @@ class GNNE2C(nn.Module):
                     h_reshaped.permute(0, 2, 1)
                 z_chunk = self.dynamic_encoder.grid_pool(grid_3d)
                 z_dynamic[chunk_idx] = z_chunk
-
-        # Assemble well readout predictions
-        y_well_aux = None
-        if y_well_list is not None and len(y_well_list) > 0:
-            n_obs = self.num_inj + self.num_prod * 2
-            y_well_aux = torch.zeros(B, n_obs, device=device)
-            for batch_idx, y_s in y_well_list:
-                y_well_aux[batch_idx] = y_s
 
         return z_dynamic, y_well_aux
 
@@ -544,7 +707,7 @@ class GNNE2C(nn.Module):
         device = x0_full.device
 
         real_ids = self._get_real_ids(case_indices, B, device)
-        z_static = self._encode_static_grouped(real_ids, B, device)
+        z_static = self._encode_static_grouped(x0_full, real_ids, B, device)
 
         ctrl_for_encoding = U[0] if len(U) > 0 else None
         z_dynamic_0, y_well_aux_0 = self._encode_dynamic_grouped(
@@ -610,13 +773,23 @@ class GNNE2C(nn.Module):
     # ------------------------------------------------------------------
 
     def predict(self, inputs):
-        xt_full, ut, yt, dt = inputs
+        # Accept either 4-tuple ``(xt_full, ut, yt, dt)`` or 5-tuple
+        # ``(xt_full, ut, yt, dt, case_indices)``.  Without
+        # ``case_indices`` the static cache falls back to assuming a
+        # single realization (legacy behaviour); with them every sample
+        # is mapped to its own realization id.
+        if len(inputs) == 5:
+            xt_full, ut, yt, dt, case_indices = inputs
+        else:
+            xt_full, ut, yt, dt = inputs
+            case_indices = None
+
         B = xt_full.shape[0]
         device = xt_full.device
 
-        real_ids = self._get_real_ids(None, B, device)
+        real_ids = self._get_real_ids(case_indices, B, device)
 
-        z_static = self._encode_static_grouped(real_ids, B, device)
+        z_static = self._encode_static_grouped(xt_full, real_ids, B, device)
         z_dynamic, _ = self._encode_dynamic_grouped(
             xt_full, real_ids, B, device, controls=ut
         )
@@ -630,12 +803,12 @@ class GNNE2C(nn.Module):
         xt_next_full = self._reassemble(x_dyn_pred, x_static)
         return xt_next_full, yt_next
 
-    def encode_initial(self, xt_full):
+    def encode_initial(self, xt_full, case_indices=None):
         B = xt_full.shape[0]
         device = xt_full.device
-        real_ids = self._get_real_ids(None, B, device)
+        real_ids = self._get_real_ids(case_indices, B, device)
 
-        z_static = self._encode_static_grouped(real_ids, B, device)
+        z_static = self._encode_static_grouped(xt_full, real_ids, B, device)
         z_dynamic, _ = self._encode_dynamic_grouped(
             xt_full, real_ids, B, device, controls=None
         )
@@ -658,41 +831,112 @@ class GNNE2C(nn.Module):
     # Weight I/O
     # ------------------------------------------------------------------
 
+    # Hybrid GNN payload format version.  Bumped when the encoder
+    # architecture changes incompatibly with prior checkpoints.  The
+    # state-dict KEY name remains ``'static_encoder'`` for the static
+    # branch even though its underlying class changed from a GNN to a
+    # CNN ``Encoder``.  Keeping the same key (matching the model
+    # attribute name and the multimodal/FNO convention) lets all
+    # existing dashboards / extractors that already understand
+    # multimodal payloads also load hybrid-GNN payloads with no code
+    # change -- ``Encoder.fc_mean.weight`` is what they look for when
+    # summing per-branch latent dims.
+    GNN_PAYLOAD_VERSION = 2
+
     def save_weights_to_file(self, encoder_file, decoder_file, transition_file):
         encoder_payload = {
+            # Hybrid layout: CNN static (still under the historical
+            # 'static_encoder' key for downstream tooling compatibility)
+            # + GNN dynamic.
             'static_encoder': self.static_encoder.state_dict(),
             'dynamic_encoder': self.dynamic_encoder.state_dict(),
             '_gnn': True,
+            '_gnn_version': self.GNN_PAYLOAD_VERSION,
         }
         torch.save(encoder_payload, win_long_path(encoder_file))
         torch.save(self.decoder.state_dict(), win_long_path(decoder_file))
         torch.save(self.transition.state_dict(), win_long_path(transition_file))
 
     def load_weights_from_file(self, encoder_file, decoder_file, transition_file):
+        # Backward-compatible full loader; delegates to the per-component
+        # methods so the warm-start path uses identical validation.
+        self._load_encoder_payload(encoder_file)
+        self._load_decoder_payload(decoder_file)
+        self._load_transition_payload(transition_file)
+
+    # --- Per-component loaders (used by warm-start paths) ---
+    def _torch_device(self):
+        if len(list(self.parameters())) > 0:
+            return next(self.parameters()).device
+        return torch.device('cpu')
+
+    def _load_encoder_payload(self, encoder_file):
         encoder_file = win_long_path(encoder_file)
-        decoder_file = win_long_path(decoder_file)
-        transition_file = win_long_path(transition_file)
-
-        device = next(self.parameters()).device if len(list(self.parameters())) > 0 \
-            else torch.device('cpu')
-
+        device = self._torch_device()
         encoder_payload = torch.load(
             encoder_file, map_location=device, weights_only=False
         )
         if not isinstance(encoder_payload, dict) or '_gnn' not in encoder_payload:
             raise ValueError(
-                "Encoder file does not contain GNN weights. "
-                "It may have been saved with a different model type."
+                f"Encoder file {encoder_file} does not contain GNN weights "
+                f"(missing '_gnn' sentinel)."
             )
+        payload_version = encoder_payload.get('_gnn_version', 1)
+        if payload_version < self.GNN_PAYLOAD_VERSION:
+            raise ValueError(
+                f"Legacy GNN checkpoint detected (_gnn_version={payload_version}). "
+                f"This release uses the hybrid CNN-static + GNN-dynamic layout "
+                f"(_gnn_version={self.GNN_PAYLOAD_VERSION}). Old checkpoints "
+                f"have an incompatible static-encoder architecture and cannot "
+                f"be loaded; please retrain with the new model."
+            )
+        # Accept either the canonical key ('static_encoder', matching the
+        # multimodal/FNO convention and the model attribute name) or the
+        # interim 'static_cnn' key used in pre-release hybrid checkpoints.
+        static_sd = (
+            encoder_payload.get('static_encoder')
+            or encoder_payload.get('static_cnn')
+        )
+        if static_sd is None or 'dynamic_encoder' not in encoder_payload:
+            raise ValueError(
+                f"Hybrid GNN encoder payload {encoder_file} is missing the "
+                f"static branch ('static_encoder' or 'static_cnn') or "
+                f"'dynamic_encoder' state dicts."
+            )
+        try:
+            self.static_encoder.load_state_dict(static_sd)
+            self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"GNN encoder weights in {encoder_file} do not match the "
+                f"current model architecture: {e}"
+            ) from e
 
-        self.static_encoder.load_state_dict(encoder_payload['static_encoder'])
-        self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
-        self.decoder.load_state_dict(
-            torch.load(decoder_file, map_location=device, weights_only=False)
-        )
-        self.transition.load_state_dict(
-            torch.load(transition_file, map_location=device, weights_only=False)
-        )
+    def _load_decoder_payload(self, decoder_file):
+        decoder_file = win_long_path(decoder_file)
+        device = self._torch_device()
+        try:
+            self.decoder.load_state_dict(
+                torch.load(decoder_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"GNN decoder weights in {decoder_file} do not match the "
+                f"current model architecture: {e}"
+            ) from e
+
+    def _load_transition_payload(self, transition_file):
+        transition_file = win_long_path(transition_file)
+        device = self._torch_device()
+        try:
+            self.transition.load_state_dict(
+                torch.load(transition_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"GNN transition weights in {transition_file} do not match "
+                f"the current transition architecture: {e}"
+            ) from e
 
     def find_and_load_weights(self, models_dir=None,
                               base_pattern='e2co', specific_pattern=None):

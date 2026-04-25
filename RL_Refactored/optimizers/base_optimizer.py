@@ -503,9 +503,13 @@ class BaseOptimizer(ABC):
             dummy_obs = torch.zeros(current_spatial.shape[0], 9).to(self.device)
             
             # ROM prediction using EXACT same method as RL environment (state_based)
-            # Input format: (spatial_state, controls, observations, dt)
+            # Input format: (spatial_state, controls, observations, dt[, case_indices])
             with torch.no_grad():
-                inputs = (current_spatial, control_normalized, dummy_obs, self.dt)
+                _case_idx_t = torch.tensor(
+                    [int(z0_idx)], dtype=torch.long, device=self.device
+                )
+                inputs = (current_spatial, control_normalized, dummy_obs,
+                          self.dt, _case_idx_t)
                 next_spatial, yobs_normalized = self.rom.predict(inputs)
                 
                 # Clamp negative spatial values to zero
@@ -513,8 +517,14 @@ class BaseOptimizer(ABC):
                 
                 # Encode next spatial to latent for state tracking
                 if hasattr(self.rom.model, 'encode_initial'):
-                    # GNN / Multimodal: unified encode_initial
-                    next_latent = self.rom.model.encode_initial(next_spatial)
+                    # GNN / Multimodal: unified encode_initial; pass
+                    # case_indices when supported.
+                    try:
+                        next_latent = self.rom.model.encode_initial(
+                            next_spatial, case_indices=_case_idx_t
+                        )
+                    except TypeError:
+                        next_latent = self.rom.model.encode_initial(next_spatial)
                 else:
                     encoder_output = self.rom.model.encoder(next_spatial)
                     if isinstance(encoder_output, tuple):

@@ -650,6 +650,9 @@ class InteractiveVisualizationDashboard:
 
                 # Benchmark state-based prediction for timing comparison
                 sb_start = _time.perf_counter()
+                _case_indices_t = torch.as_tensor(
+                    np.asarray(self.test_case_indices), dtype=torch.long
+                )
                 with torch.no_grad():
                     sb_state = self.state_pred[:, 0, :, :, :, :].to(self.device)
                     for i_t in range(self.num_tstep):
@@ -658,7 +661,9 @@ class InteractiveVisualizationDashboard:
                             dtype=torch.float32).to(self.device)
                         ctrls = self.test_controls[:, :, i_t].to(self.device)
                         obs_ph = torch.zeros(self.num_case, 9).to(self.device)
-                        sb_state, _ = self.my_rom.predict((sb_state, ctrls, obs_ph, dt_s))
+                        sb_state, _ = self.my_rom.predict(
+                            (sb_state, ctrls, obs_ph, dt_s, _case_indices_t)
+                        )
                 sb_total = _time.perf_counter() - sb_start
                 sb_per_case = sb_total / max(self.num_case, 1)
 
@@ -4598,11 +4603,20 @@ class InteractiveVisualizationDashboard:
         is_fno = hasattr(model, 'fno_encoder') and not is_mem
         is_mm = hasattr(model, 'static_encoder') and not is_gnn and not is_fno and not is_mem
 
+        # case_indices for the realization-aware static cache fast path
+        _case_indices_t = torch.as_tensor(
+            np.asarray(self.test_case_indices), dtype=torch.long
+        )
+
         with torch.no_grad():
             initial_spatial = self.state_pred[:, 0, :, :, :, :].to(self.device)
 
             if has_encode_initial:
-                z_latent = model.encode_initial(initial_spatial)
+                # Pass case_indices when supported by the underlying model.
+                try:
+                    z_latent = model.encode_initial(initial_spatial, case_indices=_case_indices_t)
+                except TypeError:
+                    z_latent = model.encode_initial(initial_spatial)
             else:
                 enc_out = model.encoder(initial_spatial)
                 z_latent = enc_out[0] if isinstance(enc_out, (tuple, list)) else enc_out
@@ -4619,9 +4633,14 @@ class InteractiveVisualizationDashboard:
                 norms_latent[:, t_idx] = z_latent.cpu().numpy().__pow__(2).sum(axis=-1).__pow__(0.5)
 
                 obs_ph = torch.zeros(nc, self.yobs_pred.shape[-1]).to(self.device)
-                state_t, _ = self.my_rom.predict((state_t, controls, obs_ph, dt_seq))
+                state_t, _ = self.my_rom.predict(
+                    (state_t, controls, obs_ph, dt_seq, _case_indices_t)
+                )
                 if has_encode_initial:
-                    z_state = model.encode_initial(state_t)
+                    try:
+                        z_state = model.encode_initial(state_t, case_indices=_case_indices_t)
+                    except TypeError:
+                        z_state = model.encode_initial(state_t)
                 else:
                     enc_out = model.encoder(state_t)
                     z_state = enc_out[0] if isinstance(enc_out, (tuple, list)) else enc_out

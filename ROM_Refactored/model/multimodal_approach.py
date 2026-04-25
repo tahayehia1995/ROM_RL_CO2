@@ -29,6 +29,7 @@ from model.models.transition_utils import create_trans_encoder
 from model.losses.spatial_enhancements import Discriminator3D
 from model.utils.initialization import weights_init
 from model.utils import win_long_path
+from model.utils.realization_cache import RealizationCache
 
 
 def _build_branch_config(base_config, n_channels, latent_dim):
@@ -217,8 +218,16 @@ class MultimodalMSE2C(nn.Module):
                 f"latent_dim ({latent_dim})"
             )
 
-        self._cached_static_input = None
-        self._cached_z_static = None
+        # Realization-aware multi-entry cache for z_static (replaces the
+        # legacy single-entry tensor-identity cache so cycling through
+        # multiple realizations during inference no longer thrashes).
+        self._z_static_cache = RealizationCache(maxlen=64)
+        # Optional case-index -> realization-id mapping.  When set (via
+        # ``set_case_to_realization`` from the data-loading layer) the
+        # cache lookup follows the efficient int-key path identical to
+        # the GNN; otherwise it falls back to the case index itself or
+        # to per-sample tensor fingerprinting as a last resort.
+        self._case_to_realization = None
 
         self._build_model()
 
@@ -311,23 +320,53 @@ class MultimodalMSE2C(nn.Module):
     # --------------------------------------------------------------------- #
     #  Helpers
     # --------------------------------------------------------------------- #
-    def _encode_static_cached(self, x_static):
-        """Encode static channels with caching. Cache is bypassed during training."""
+    def set_case_to_realization(self, mapping):
+        """Install a precomputed case-index -> realization-id lookup so
+        the static cache can use the efficient int-key path (matching
+        the GNN's behaviour).
+
+        Pass ``None`` to clear the mapping and revert to the
+        case-index-as-key / tensor-fingerprint fallbacks.
+
+        Typical caller: a data-loading or dashboard module that has
+        already grouped cases into realizations (for instance via
+        :func:`model.utils.realization_cache.identify_realizations_from_arrays`).
+        """
+        self._case_to_realization = mapping
+        # Mapping changed -> existing cache entries refer to a possibly
+        # different key space; safest to drop them.
+        self._z_static_cache.clear()
+
+    def _encode_static_cached(self, x_static, case_indices=None):
+        """Encode static channels through the multi-entry realization cache.
+
+        - Training: cache is cleared and bypassed so weight updates always
+          flow through the encoder.
+        - Inference: each batch sample maps to a cache key via
+          :meth:`RealizationCache.derive_keys` (case_indices + mapping
+          preferred, then case_indices alone, then per-sample tensor
+          fingerprint as a fallback).  Cached realizations are reused;
+          only cache misses are pushed through the encoder.
+        """
         if self.training:
+            self._z_static_cache.clear()
             z_static, _, _ = self.static_encoder(x_static)
-            self._cached_static_input = None
-            self._cached_z_static = None
             return z_static
 
-        if (self._cached_z_static is not None
-                and self._cached_static_input is not None
-                and self._cached_static_input.shape == x_static.shape
-                and torch.equal(self._cached_static_input, x_static)):
-            return self._cached_z_static
-
-        z_static, _, _ = self.static_encoder(x_static)
-        self._cached_static_input = x_static.detach().clone()
-        self._cached_z_static = z_static.detach()
+        keys = self._z_static_cache.derive_keys(
+            x_static=x_static,
+            case_indices=case_indices,
+            case_to_realization=self._case_to_realization,
+            batch_size=x_static.shape[0],
+        )
+        z_static, miss_idx, miss_keys = self._z_static_cache.lookup(
+            keys, self.static_latent_dim, x_static.device, dtype=x_static.dtype
+        )
+        if miss_idx.numel() > 0:
+            x_miss = x_static.index_select(0, miss_idx)
+            z_miss, _, _ = self.static_encoder(x_miss)
+            z_static.index_copy_(0, miss_idx, z_miss)
+            self._z_static_cache.store(miss_keys, z_miss)
         return z_static
 
     def _split_channels(self, x):
@@ -365,7 +404,14 @@ class MultimodalMSE2C(nn.Module):
             )
 
     def forward(self, inputs):
-        X, U, Y, dt = inputs
+        # Inputs may carry an optional ``case_indices`` 5-tuple element
+        # (matching the GNN convention) that lets the static cache hit
+        # the realization-keyed fast path during training/inference.
+        if len(inputs) == 5:
+            X, U, Y, dt, case_indices = inputs
+        else:
+            X, U, Y, dt = inputs
+            case_indices = None
 
         if len(X) != self.n_steps:
             raise ValueError(f"Expected {self.n_steps} states but got {len(X)}")
@@ -377,7 +423,7 @@ class MultimodalMSE2C(nn.Module):
         x0_full = X[0]
         x0_static, x0_dynamic = self._split_channels(x0_full)
 
-        z_static = self._encode_static_cached(x0_static)
+        z_static = self._encode_static_cached(x0_static, case_indices=case_indices)
         z_dynamic_0, mu0_d, logvar0_d = self.dynamic_encoder(x0_dynamic)
 
         z_dyn_for_model = z_dynamic_0
@@ -452,11 +498,20 @@ class MultimodalMSE2C(nn.Module):
     #  Predict (inference, single step)
     # --------------------------------------------------------------------- #
     def predict(self, inputs):
-        xt_full, ut, yt, dt = inputs
+        # ``inputs`` may be either the legacy 4-tuple or a 5-tuple
+        # ``(xt_full, ut, yt, dt, case_indices)`` (matching the GNN
+        # convention).  The case-index path lets the static cache use
+        # the efficient int-key lookup; without it we fall back to the
+        # tensor-fingerprint path.
+        if len(inputs) == 5:
+            xt_full, ut, yt, dt, case_indices = inputs
+        else:
+            xt_full, ut, yt, dt = inputs
+            case_indices = None
 
         x_static, x_dynamic = self._split_channels(xt_full)
 
-        z_static = self._encode_static_cached(x_static)
+        z_static = self._encode_static_cached(x_static, case_indices=case_indices)
         z_dynamic, _, _ = self.dynamic_encoder(x_dynamic)
 
         z_dyn_next, yt_next = self.transition(z_dynamic, z_static, dt, ut)
@@ -467,14 +522,17 @@ class MultimodalMSE2C(nn.Module):
         xt_next_full = self._reassemble(x_dyn_pred, x_static)
         return xt_next_full, yt_next
 
-    def encode_initial(self, xt_full):
+    def encode_initial(self, xt_full, case_indices=None):
         """Encode a full spatial state into a concatenated latent vector.
+
+        ``case_indices`` is optional and, when supplied, lets the static
+        cache use the efficient int-key fast path.
 
         Returns:
             (B, static_latent_dim + dynamic_latent_dim) tensor
         """
         x_static, x_dynamic = self._split_channels(xt_full)
-        z_static = self._encode_static_cached(x_static)
+        z_static = self._encode_static_cached(x_static, case_indices=case_indices)
         z_dynamic, _, _ = self.dynamic_encoder(x_dynamic)
         return torch.cat([z_static, z_dynamic], dim=-1)
 
@@ -507,31 +565,69 @@ class MultimodalMSE2C(nn.Module):
         torch.save(self.transition.state_dict(), win_long_path(transition_file))
 
     def load_weights_from_file(self, encoder_file, decoder_file, transition_file):
-        encoder_file = win_long_path(encoder_file)
-        decoder_file = win_long_path(decoder_file)
-        transition_file = win_long_path(transition_file)
+        # Backward-compatible full-model loader.  Internally delegates to
+        # the per-component loaders so the warm-start path and the
+        # full-load path share validation logic.
+        self._load_encoder_payload(encoder_file)
+        self._load_decoder_payload(decoder_file)
+        self._load_transition_payload(transition_file)
 
-        device = torch.device(
+    # --- Per-component loaders (used by warm-start paths) ---
+    @staticmethod
+    def _torch_device():
+        return torch.device(
             "cuda" if torch.cuda.is_available()
             else ("mps" if torch.backends.mps.is_available() else "cpu")
         )
 
-        encoder_payload = torch.load(encoder_file, map_location=device, weights_only=False)
-
+    def _load_encoder_payload(self, encoder_file):
+        """Load only the static_encoder + dynamic_encoder state dicts."""
+        encoder_file = win_long_path(encoder_file)
+        device = self._torch_device()
+        encoder_payload = torch.load(
+            encoder_file, map_location=device, weights_only=False
+        )
         if not isinstance(encoder_payload, dict) or '_multimodal' not in encoder_payload:
             raise ValueError(
-                "Encoder file does not contain multimodal weights. "
-                "It may have been saved with the standard MSE2C model."
+                f"Encoder file {encoder_file} is not a multimodal payload "
+                f"(missing '_multimodal' sentinel)."
             )
+        try:
+            self.static_encoder.load_state_dict(encoder_payload['static_encoder'])
+            self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Multimodal encoder weights in {encoder_file} do not match "
+                f"the current model architecture: {e}"
+            ) from e
 
-        self.static_encoder.load_state_dict(encoder_payload['static_encoder'])
-        self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
-        self.decoder.load_state_dict(
-            torch.load(decoder_file, map_location=device, weights_only=False)
-        )
-        self.transition.load_state_dict(
-            torch.load(transition_file, map_location=device, weights_only=False)
-        )
+    def _load_decoder_payload(self, decoder_file):
+        """Load only the decoder state dict."""
+        decoder_file = win_long_path(decoder_file)
+        device = self._torch_device()
+        try:
+            self.decoder.load_state_dict(
+                torch.load(decoder_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Multimodal decoder weights in {decoder_file} do not match "
+                f"the current model architecture: {e}"
+            ) from e
+
+    def _load_transition_payload(self, transition_file):
+        """Load only the transition state dict."""
+        transition_file = win_long_path(transition_file)
+        device = self._torch_device()
+        try:
+            self.transition.load_state_dict(
+                torch.load(transition_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Multimodal transition weights in {transition_file} do not match "
+                f"the current transition architecture: {e}"
+            ) from e
 
     def find_and_load_weights(self, models_dir=None,
                               base_pattern='e2co', specific_pattern=None):

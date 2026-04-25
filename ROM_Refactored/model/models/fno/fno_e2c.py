@@ -366,7 +366,15 @@ class FNOE2C(nn.Module):
     #  Predict (inference, single step)
     # --------------------------------------------------------------------- #
     def predict(self, inputs):
-        xt_full, ut, yt, dt = inputs
+        # Accept legacy 4-tuple or 5-tuple with case_indices.  The
+        # FNO's ``_encode_static_cached`` does not yet route through
+        # the realization-keyed cache, so ``case_indices`` is accepted
+        # for API symmetry with the multimodal/MEM/GNN backbones and
+        # otherwise ignored here.
+        if len(inputs) == 5:
+            xt_full, ut, yt, dt, _case_indices = inputs
+        else:
+            xt_full, ut, yt, dt = inputs
 
         x_static, x_dynamic = self._split_channels(xt_full)
 
@@ -381,8 +389,13 @@ class FNOE2C(nn.Module):
         xt_next_full = self._reassemble(x_dyn_pred, x_static)
         return xt_next_full, yt_next
 
-    def encode_initial(self, xt_full):
-        """Encode full spatial state to concatenated latent vector."""
+    def encode_initial(self, xt_full, case_indices=None):
+        """Encode full spatial state to concatenated latent vector.
+
+        ``case_indices`` is accepted for API symmetry with the
+        multimodal/MEM/GNN backbones; FNO's static cache does not yet
+        consume it.
+        """
         x_static, x_dynamic = self._split_channels(xt_full)
         z_static = self._encode_static_cached(x_static)
         z_dynamic, _, _ = self.dynamic_encoder(x_dynamic)
@@ -412,32 +425,65 @@ class FNOE2C(nn.Module):
         torch.save(self.transition.state_dict(), win_long_path(transition_file))
 
     def load_weights_from_file(self, encoder_file, decoder_file, transition_file):
-        encoder_file = win_long_path(encoder_file)
-        decoder_file = win_long_path(decoder_file)
-        transition_file = win_long_path(transition_file)
+        # Backward-compatible full loader; delegates to the per-component
+        # methods so the warm-start path uses identical validation.
+        self._load_encoder_payload(encoder_file)
+        self._load_decoder_payload(decoder_file)
+        self._load_transition_payload(transition_file)
 
-        device = torch.device(
+    # --- Per-component loaders (used by warm-start paths) ---
+    @staticmethod
+    def _torch_device():
+        return torch.device(
             "cuda" if torch.cuda.is_available()
             else ("mps" if torch.backends.mps.is_available() else "cpu")
         )
 
-        encoder_payload = torch.load(encoder_file, map_location=device,
-                                     weights_only=False)
-
+    def _load_encoder_payload(self, encoder_file):
+        encoder_file = win_long_path(encoder_file)
+        device = self._torch_device()
+        encoder_payload = torch.load(
+            encoder_file, map_location=device, weights_only=False
+        )
         if not isinstance(encoder_payload, dict) or '_fno' not in encoder_payload:
             raise ValueError(
-                "Encoder file does not contain FNO weights. "
-                "It may have been saved with a different model type."
+                f"Encoder file {encoder_file} is not an FNO payload "
+                f"(missing '_fno' sentinel)."
             )
+        try:
+            self.static_encoder.load_state_dict(encoder_payload['static_encoder'])
+            self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"FNO encoder weights in {encoder_file} do not match the "
+                f"current model architecture: {e}"
+            ) from e
 
-        self.static_encoder.load_state_dict(encoder_payload['static_encoder'])
-        self.dynamic_encoder.load_state_dict(encoder_payload['dynamic_encoder'])
-        self.decoder.load_state_dict(
-            torch.load(decoder_file, map_location=device, weights_only=False)
-        )
-        self.transition.load_state_dict(
-            torch.load(transition_file, map_location=device, weights_only=False)
-        )
+    def _load_decoder_payload(self, decoder_file):
+        decoder_file = win_long_path(decoder_file)
+        device = self._torch_device()
+        try:
+            self.decoder.load_state_dict(
+                torch.load(decoder_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"FNO decoder weights in {decoder_file} do not match the "
+                f"current model architecture: {e}"
+            ) from e
+
+    def _load_transition_payload(self, transition_file):
+        transition_file = win_long_path(transition_file)
+        device = self._torch_device()
+        try:
+            self.transition.load_state_dict(
+                torch.load(transition_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"FNO transition weights in {transition_file} do not match "
+                f"the current transition architecture: {e}"
+            ) from e
 
     def find_and_load_weights(self, models_dir=None,
                               base_pattern='e2co', specific_pattern=None):

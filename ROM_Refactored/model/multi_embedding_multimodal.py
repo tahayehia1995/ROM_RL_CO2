@@ -45,6 +45,7 @@ from model.models.transition_utils import create_trans_encoder
 from model.losses.spatial_enhancements import Discriminator3D
 from model.utils.initialization import weights_init
 from model.utils import win_long_path
+from model.utils.realization_cache import RealizationCache
 
 from model.multimodal_approach import (
     _build_branch_config,
@@ -213,8 +214,17 @@ class MultiEmbeddingMultimodal(nn.Module):
         # layouts. Set it to True to take that path.
         self._multi_embedding_sentinel = True
 
-        self._cached_static_input = None
-        self._cached_z_static = None
+        # Realization-aware multi-entry static cache (replaces the legacy
+        # single-entry tensor-identity cache so cycling through multiple
+        # realizations during inference no longer thrashes).  Keyed off
+        # the static-channel slice of the full input via the shared
+        # ``RealizationCache``.
+        self._z_static_cache = RealizationCache(maxlen=64)
+        # Optional case-index -> realization-id mapping (see
+        # ``set_case_to_realization``).  When set, the cache lookup uses
+        # the efficient int-key path identical to the GNN; otherwise it
+        # falls back to case_index / tensor-fingerprint paths.
+        self._case_to_realization = None
 
         self._build_model(spatial_shape)
 
@@ -395,35 +405,63 @@ class MultiEmbeddingMultimodal(nn.Module):
     def _encode_branch(self, branch, x_branch):
         return self.encoders[branch['name']](x_branch)
 
-    def _encode_static_cached(self, x_full):
+    def set_case_to_realization(self, mapping):
+        """Install a precomputed case-index -> realization-id lookup so
+        the static cache can use the efficient int-key path (matching
+        the GNN's behaviour).
+
+        Pass ``None`` to clear and revert to the case-index /
+        tensor-fingerprint fallbacks.
+        """
+        self._case_to_realization = mapping
+        self._z_static_cache.clear()
+
+    def _encode_static_cached(self, x_full, case_indices=None):
         """Encode every static branch from the full input and concat in declaration order.
 
-        Cache the concatenated static latent during inference; bypass during training.
+        Uses the multi-entry realization cache so multiple distinct
+        realizations can be served simultaneously without thrashing.
+        Cache key derivation prefers ``case_indices`` (+ optional
+        ``case_to_realization`` mapping) and falls back to per-sample
+        tensor fingerprinting on the static-channel slice when
+        ``case_indices`` are not available.
         """
+        # No static branches: nothing to encode or cache.
+        if not self.static_branches:
+            return x_full.new_zeros(x_full.shape[0], 0)
+
         if self.training:
-            self._cached_static_input = None
-            self._cached_z_static = None
+            self._z_static_cache.clear()
             parts = []
             for b in self.static_branches:
                 z_b, _, _ = self._encode_branch(b, self._slice_branch(x_full, b))
                 parts.append(z_b)
-            return torch.cat(parts, dim=-1) if parts else x_full.new_zeros(x_full.shape[0], 0)
+            return torch.cat(parts, dim=-1)
 
-        # Inference: cache by full input identity (static channels only matter,
-        # but full-input identity is a sufficient cache key).
-        if (self._cached_z_static is not None
-                and self._cached_static_input is not None
-                and self._cached_static_input.shape == x_full.shape
-                and torch.equal(self._cached_static_input, x_full)):
-            return self._cached_z_static
-
-        parts = []
-        for b in self.static_branches:
-            z_b, _, _ = self._encode_branch(b, self._slice_branch(x_full, b))
-            parts.append(z_b)
-        z_static = torch.cat(parts, dim=-1) if parts else x_full.new_zeros(x_full.shape[0], 0)
-        self._cached_static_input = x_full.detach().clone()
-        self._cached_z_static = z_static.detach()
+        # Inference: derive keys via the unified helper.  When
+        # ``case_indices`` are provided we skip the costly tensor hash
+        # entirely; the fallback hashes only the static-channel slice
+        # so dynamic content does not pollute the cache key.
+        static_chs = [ch for b in self.static_branches for ch in b['channels']]
+        x_static_slice = x_full[:, static_chs, ...]
+        keys = self._z_static_cache.derive_keys(
+            x_static=x_static_slice,
+            case_indices=case_indices,
+            case_to_realization=self._case_to_realization,
+            batch_size=x_full.shape[0],
+        )
+        z_static, miss_idx, miss_keys = self._z_static_cache.lookup(
+            keys, self.static_latent_dim, x_full.device, dtype=x_full.dtype
+        )
+        if miss_idx.numel() > 0:
+            x_miss = x_full.index_select(0, miss_idx)
+            parts = []
+            for b in self.static_branches:
+                z_b, _, _ = self._encode_branch(b, self._slice_branch(x_miss, b))
+                parts.append(z_b)
+            z_miss = torch.cat(parts, dim=-1)
+            z_static.index_copy_(0, miss_idx, z_miss)
+            self._z_static_cache.store(miss_keys, z_miss)
         return z_static
 
     def _encode_dynamic(self, x_full):
@@ -545,7 +583,13 @@ class MultiEmbeddingMultimodal(nn.Module):
     #  Forward (training)
     # ------------------------------------------------------------------ #
     def forward(self, inputs):
-        X, U, Y, dt = inputs
+        # Inputs may carry an optional ``case_indices`` 5-tuple element
+        # so the static cache can use the realization-keyed fast path.
+        if len(inputs) == 5:
+            X, U, Y, dt, case_indices = inputs
+        else:
+            X, U, Y, dt = inputs
+            case_indices = None
 
         if len(X) != self.n_steps:
             raise ValueError(f"Expected {self.n_steps} states but got {len(X)}")
@@ -556,7 +600,7 @@ class MultiEmbeddingMultimodal(nn.Module):
 
         x0_full = X[0]
 
-        z_static = self._encode_static_cached(x0_full)
+        z_static = self._encode_static_cached(x0_full, case_indices=case_indices)
         z_dyn_0, mu0_d, logvar0_d = self._encode_dynamic(x0_full)
 
         # cache for invertibility loss
@@ -634,9 +678,14 @@ class MultiEmbeddingMultimodal(nn.Module):
     #  Predict (inference, single step)
     # ------------------------------------------------------------------ #
     def predict(self, inputs):
-        xt_full, ut, yt, dt = inputs
+        # Accept either 4-tuple or 5-tuple with case_indices.
+        if len(inputs) == 5:
+            xt_full, ut, yt, dt, case_indices = inputs
+        else:
+            xt_full, ut, yt, dt = inputs
+            case_indices = None
 
-        z_static = self._encode_static_cached(xt_full)
+        z_static = self._encode_static_cached(xt_full, case_indices=case_indices)
         z_dyn, _, _ = self._encode_dynamic(xt_full)
 
         z_dyn_next, yt_next = self.transition(z_dyn, z_static, dt, ut)
@@ -645,13 +694,16 @@ class MultiEmbeddingMultimodal(nn.Module):
         xt_next_full = self._reassemble(dyn_preds, xt_full)
         return xt_next_full, yt_next
 
-    def encode_initial(self, xt_full):
+    def encode_initial(self, xt_full, case_indices=None):
         """Encode a full-channel state into the concatenated latent.
+
+        ``case_indices`` is optional and, when supplied, lets the static
+        cache use the efficient int-key fast path.
 
         Returns:
             (B, static_latent_dim + dynamic_latent_dim) tensor.
         """
-        z_static = self._encode_static_cached(xt_full)
+        z_static = self._encode_static_cached(xt_full, case_indices=case_indices)
         z_dyn, _, _ = self._encode_dynamic(xt_full)
         return torch.cat([z_static, z_dyn], dim=-1)
 
@@ -709,44 +761,86 @@ class MultiEmbeddingMultimodal(nn.Module):
         torch.save(self.transition.state_dict(), win_long_path(transition_file))
 
     def load_weights_from_file(self, encoder_file, decoder_file, transition_file):
-        encoder_file = win_long_path(encoder_file)
-        decoder_file = win_long_path(decoder_file)
-        transition_file = win_long_path(transition_file)
+        # Backward-compatible full loader; delegates to the per-component
+        # methods so the warm-start path uses identical validation.
+        self._load_encoder_payload(encoder_file)
+        self._load_decoder_payload(decoder_file)
+        self._load_transition_payload(transition_file)
 
-        device = torch.device(
+    # --- Per-component loaders (used by warm-start paths) ---
+    @staticmethod
+    def _torch_device():
+        return torch.device(
             "cuda" if torch.cuda.is_available()
             else ("mps" if torch.backends.mps.is_available() else "cpu")
         )
 
-        encoder_payload = torch.load(encoder_file, map_location=device, weights_only=False)
+    def _load_encoder_payload(self, encoder_file):
+        encoder_file = win_long_path(encoder_file)
+        device = self._torch_device()
+        encoder_payload = torch.load(
+            encoder_file, map_location=device, weights_only=False
+        )
         if not isinstance(encoder_payload, dict) or not encoder_payload.get('_multi_embedding'):
             raise ValueError(
-                "Encoder file is not a multi_embedding payload (missing "
-                "'_multi_embedding' sentinel). Refusing to load."
+                f"Encoder file {encoder_file} is not a multi_embedding "
+                f"payload (missing '_multi_embedding' sentinel)."
             )
-
         encoders_sd = encoder_payload.get('encoders', {})
         for name, enc in self.encoders.items():
             if name not in encoders_sd:
-                raise KeyError(f"Encoder payload missing branch '{name}'")
-            enc.load_state_dict(encoders_sd[name])
+                raise KeyError(
+                    f"MultiEmbedding encoder payload {encoder_file} missing "
+                    f"branch '{name}'."
+                )
+            try:
+                enc.load_state_dict(encoders_sd[name])
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"MultiEmbedding encoder branch '{name}' weights in "
+                    f"{encoder_file} do not match the current model "
+                    f"architecture: {e}"
+                ) from e
 
-        decoder_payload = torch.load(decoder_file, map_location=device, weights_only=False)
-        if isinstance(decoder_payload, dict) and decoder_payload.get('_multi_embedding'):
-            decoders_sd = decoder_payload.get('decoders', {})
-        else:
+    def _load_decoder_payload(self, decoder_file):
+        decoder_file = win_long_path(decoder_file)
+        device = self._torch_device()
+        decoder_payload = torch.load(
+            decoder_file, map_location=device, weights_only=False
+        )
+        if not (isinstance(decoder_payload, dict) and decoder_payload.get('_multi_embedding')):
             raise ValueError(
-                "Decoder file is not a multi_embedding payload (missing "
-                "'_multi_embedding' sentinel). Refusing to load."
+                f"Decoder file {decoder_file} is not a multi_embedding "
+                f"payload (missing '_multi_embedding' sentinel)."
             )
+        decoders_sd = decoder_payload.get('decoders', {})
         for name, dec in self.decoders.items():
             if name not in decoders_sd:
-                raise KeyError(f"Decoder payload missing branch '{name}'")
-            dec.load_state_dict(decoders_sd[name])
+                raise KeyError(
+                    f"MultiEmbedding decoder payload {decoder_file} missing "
+                    f"branch '{name}'."
+                )
+            try:
+                dec.load_state_dict(decoders_sd[name])
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"MultiEmbedding decoder branch '{name}' weights in "
+                    f"{decoder_file} do not match the current model "
+                    f"architecture: {e}"
+                ) from e
 
-        self.transition.load_state_dict(
-            torch.load(transition_file, map_location=device, weights_only=False)
-        )
+    def _load_transition_payload(self, transition_file):
+        transition_file = win_long_path(transition_file)
+        device = self._torch_device()
+        try:
+            self.transition.load_state_dict(
+                torch.load(transition_file, map_location=device, weights_only=False)
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"MultiEmbedding transition weights in {transition_file} do "
+                f"not match the current transition architecture: {e}"
+            ) from e
 
     def find_and_load_weights(self, models_dir=None,
                               base_pattern='e2co', specific_pattern=None):

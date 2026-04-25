@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from testing.visualization.utils import create_visualization_dashboard
 from utilities.timing import Timer, collect_prediction_metadata
+from model.utils.realization_cache import case_to_realization_from_static_tensor
 
 _ROM_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
@@ -247,7 +248,29 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
     print(f"Initial state shape: {state_t_seq.shape}")
     print(f"Control sequence shape: {bhp_seq.shape}")
     print(f"Observation sequence shape: {yobs_t_seq.shape}")
-    
+
+    # --- Realization-aware static cache setup ---
+    # If the underlying model exposes per-branch ``static_channels`` (the
+    # multimodal/MEM/GNN/FNO families) and a ``set_case_to_realization``
+    # hook (added in Phase-1 of the cache refactor), build a one-shot
+    # case-index -> realization-id mapping by fingerprinting the static
+    # slice of every test case's initial state.  This lets the static
+    # cache reuse z_static across every realization-equivalent case
+    # without re-encoding -- the same fast path the GNN already uses.
+    test_case_indices_t = torch.as_tensor(test_case_indices, dtype=torch.long)
+    underlying = getattr(my_rom, 'model', my_rom)
+    static_chs = getattr(underlying, 'static_channels', None)
+    if static_chs is not None and hasattr(my_rom, 'set_case_to_realization'):
+        try:
+            x_static_all = state_test[:, 0][:, static_chs, ...]
+            mapping = case_to_realization_from_static_tensor(x_static_all)
+            my_rom.set_case_to_realization(mapping)
+            num_real = len(set(mapping))
+            print(f"   🗂️  Static cache: {n_sample} cases mapped to "
+                  f"{num_real} unique realizations.")
+        except Exception as e:
+            print(f"   ⚠️  Could not build case_to_realization mapping: {e}")
+
     # Step 5: Run sequential predictions
     print(f"\n🚀 Running sequential predictions...")
     
@@ -260,9 +283,11 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
             # Time step for current iteration
             dt_seq = torch.tensor(np.ones((num_case, 1)) * indt_del[i_tstep], dtype=torch.float32).to(device)
             
-            # Prepare inputs for model
-            inputs = (state_t_seq, bhp_seq[:, :, i_tstep], yobs_t_seq[:, :, i_tstep], dt_seq)
-            
+            # Prepare inputs for model: include case_indices so the
+            # static cache can use the realization-keyed fast path.
+            inputs = (state_t_seq, bhp_seq[:, :, i_tstep],
+                      yobs_t_seq[:, :, i_tstep], dt_seq, test_case_indices_t)
+
             # Predict next state
             state_t1_seq, yobs_t1_seq = my_rom.predict(inputs)
             
@@ -394,9 +419,12 @@ def generate_test_visualization_standalone(loaded_data, my_rom, device, data_dir
                 # Time step for current iteration
                 dt_seq = torch.tensor(np.ones((num_train_case, 1)) * indt_del[i_tstep], dtype=torch.float32).to(device)
                 
-                # Prepare inputs for model
-                inputs = (train_state_t_seq, train_bhp_seq[:, :, i_tstep], train_yobs_t_seq[:, :, i_tstep], dt_seq)
-                
+                # Prepare inputs for model: include case_indices for the
+                # realization-aware static cache fast path.
+                train_case_indices_t = torch.as_tensor(train_case_indices, dtype=torch.long)
+                inputs = (train_state_t_seq, train_bhp_seq[:, :, i_tstep],
+                          train_yobs_t_seq[:, :, i_tstep], dt_seq, train_case_indices_t)
+
                 # Predict next state
                 train_state_t1_seq, train_yobs_t1_seq = my_rom.predict(inputs)
                 

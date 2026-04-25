@@ -78,6 +78,55 @@ class ROMWithE2C(nn.Module):
         self.test_kl_loss = torch.tensor(0.0)  # VAE KL divergence loss
         self.test_fft_loss = torch.tensor(0.0)  # FFT frequency domain loss
     
+    def set_case_to_realization(self, mapping):
+        """Forward a precomputed case-index -> realization-id mapping to
+        the underlying model's static cache.
+
+        No-op for backbones that don't expose ``set_case_to_realization``
+        (e.g. plain MSE2C / FNO).  Used by the testing dashboard, RL
+        environment, and offline rollout pipelines so the static cache
+        can take the efficient int-key path identical to the GNN.
+        """
+        if hasattr(self.model, 'set_case_to_realization'):
+            self.model.set_case_to_realization(mapping)
+
+    def load_partial_weights(self, encoder_file=None, decoder_file=None,
+                             transition_file=None):
+        """Selectively warm-start any subset of (encoder, decoder, transition).
+
+        Each ``*_file`` argument is either ``None`` (skip that component)
+        or a path to a checkpoint produced by ``save_weights_to_file``.
+        Backbones that do not expose per-component loaders (currently
+        only the legacy MSE2C) silently skip with a ``False`` flag in
+        the returned summary.
+
+        Returns:
+            dict with keys ``encoder``, ``decoder``, ``transition`` whose
+            values are ``True`` when that component was loaded
+            successfully and ``False`` otherwise.
+
+        Raises:
+            ``ValueError`` / ``RuntimeError`` if a checkpoint exists but
+            does not match the current model architecture (we surface
+            shape / sentinel mismatches loudly rather than silently
+            falling back to a cold start).
+        """
+        summary = {'encoder': False, 'decoder': False, 'transition': False}
+
+        if encoder_file is not None and hasattr(self.model, '_load_encoder_payload'):
+            self.model._load_encoder_payload(encoder_file)
+            summary['encoder'] = True
+
+        if decoder_file is not None and hasattr(self.model, '_load_decoder_payload'):
+            self.model._load_decoder_payload(decoder_file)
+            summary['decoder'] = True
+
+        if transition_file is not None and hasattr(self.model, '_load_transition_payload'):
+            self.model._load_transition_payload(transition_file)
+            summary['transition'] = True
+
+        return summary
+
     def _setup_schedulers(self, config):
         """Setup learning rate schedulers based on configuration."""
         self.scheduler = None
@@ -167,10 +216,11 @@ class ROMWithE2C(nn.Module):
         """
         self.model.eval()
         with torch.no_grad():
-            # Updated for 3D CNN: inputs now expect 3D reservoir data
-            # Original: xt, ut, yt, dt, perm = inputs
-            xt, ut, yt, dt = inputs
-            xt1_pred, yt1_pred = self.model.predict(inputs)        
+            # ``inputs`` is either the legacy 4-tuple ``(xt, ut, yt, dt)``
+            # or a 5-tuple ``(xt, ut, yt, dt, case_indices)``.  The
+            # wrapper does not need to inspect the contents -- the
+            # underlying model's predict() handles both shapes.
+            xt1_pred, yt1_pred = self.model.predict(inputs)
         return xt1_pred, yt1_pred
     
     def predict_latent(self, zt, dt, ut):

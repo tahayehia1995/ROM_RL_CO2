@@ -169,9 +169,18 @@ class MSE2C(nn.Module):
         """
         Single-step prediction for inference.
         In inference mode, we use the mean (deterministic) for VAE.
+
+        Accepts the legacy 4-tuple ``(xt, ut, yt, dt)`` or a 5-tuple
+        ``(xt, ut, yt, dt, case_indices)`` (the latter is the convention
+        used by the multimodal/MEM/GNN backbones to enable
+        realization-keyed static caching).  Standard MSE2C has no static
+        cache, so ``case_indices`` is accepted for API symmetry only and
+        is otherwise ignored.
         """
-        # xt, ut, yt, dt, perm = inputs
-        xt, ut, yt, dt = inputs
+        if len(inputs) == 5:
+            xt, ut, yt, dt, _case_indices = inputs
+        else:
+            xt, ut, yt, dt = inputs
 
         zt, _, _ = self.encoder(xt)
         zt_next, yt_next = self.transition(zt, dt, ut)

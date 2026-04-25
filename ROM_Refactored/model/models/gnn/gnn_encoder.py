@@ -1,21 +1,24 @@
 """
-GNN Encoders for E2C
-=====================
-Two-branch encoder matching the multimodal pattern:
-- GNNStaticEncoder:  PERMI, POROS, well indicators -> z_static  (32-dim)
-- GNNDynamicEncoder: SG, PRES, well_indicators, control -> z_dynamic (96-dim)
+GNN Encoders for the Hybrid GNN E2C
+====================================
+Single GNN branch (the dynamic encoder) plus its support modules.  The
+static branch is now a 3D CNN built directly inside ``GNNE2C`` (see
+``gnn_e2c.py``) and no longer lives here.
 
-The dynamic encoder uses GridPooling (scatter GNN embeddings back to the
-3D grid, then Conv3D + flatten + Linear) to preserve spatial structure
-for the CNN decoder and transition model.
-
-Supports both single-graph and batched (PyG mini-batch) modes.
+- ``GNNDynamicEncoder``: per-active-node features
+  ``[SG, PRES, PERMI, POROS, is_inj, is_prod, well_one_hot, control]``
+  -> GNN message passing -> GridPooling -> ``z_dynamic``.
+- ``GridPooling``: scatter GNN node embeddings back to the 3D grid,
+  apply Conv3D + flatten + Linear, preserving spatial structure for the
+  shared CNN decoder.
+- ``WellReadout``: auxiliary observation predictor pooling per-well
+  perforation embeddings.  Vectorised batched implementation.
 """
 
 import torch
 import torch.nn as nn
 
-from .gnn_layers import GNNStack, AttentionPooling
+from .gnn_layers import GNNStack
 
 
 class GridPooling(nn.Module):
@@ -61,10 +64,17 @@ class GridPooling(nn.Module):
 
 
 class WellReadout(nn.Module):
-    """
-    Predict well observations directly from GNN node embeddings at
-    well perforation nodes.  Each well's 25-layer node embeddings are
-    average-pooled, then mapped to observation values via a small MLP.
+    """Predict well observations from per-well pooled GNN embeddings.
+
+    Vectorised: takes a single tensor with all wells stacked along an
+    inner axis instead of a Python list.  The two underlying MLPs (one
+    per well type) are still applied per group, but each group is
+    processed in a single batched matmul.
+
+    Output ordering matches the y-observation tensor:
+        [BHP_inj0, BHP_inj1, ...,
+         GasRate_prod0, GasRate_prod1, ...,
+         WaterRate_prod0, WaterRate_prod1, ...]
     """
 
     def __init__(self, hidden_dim: int, num_inj: int, num_prod: int):
@@ -82,56 +92,31 @@ class WellReadout(nn.Module):
             nn.Linear(hidden_dim // 2, 2),
         )
 
-    def forward(self, h_per_well):
+    def forward(self, well_pooled):
         """
         Args:
-            h_per_well: list of (hidden_dim,) tensors, one per well.
-                        Order: injectors first (sorted), then producers (sorted).
+            well_pooled: (B, num_wells, hidden_dim) where the wells are
+                         ordered injectors-first (sorted) then producers
+                         (sorted), matching the order the GNN encoder
+                         uses for its precomputed well-readout buffers.
+
         Returns:
-            y_aux: (n_obs,) — predicted observations matching y ordering:
-                   [BHP_I1, BHP_I2, BHP_I4, GasRate_P1, GasRate_P2, GasRate_P3,
-                    WaterRate_P1, WaterRate_P2, WaterRate_P3]
+            y_aux: (B, n_obs) where ``n_obs == num_inj + 2 * num_prod``.
         """
-        inj_preds = []
-        for i in range(self.num_inj):
-            inj_preds.append(self.inj_mlp(h_per_well[i]))
+        if well_pooled.dim() != 3:
+            raise ValueError(
+                f"WellReadout expected (B, num_wells, hidden_dim); "
+                f"got shape {tuple(well_pooled.shape)}"
+            )
+        inj = well_pooled[:, :self.num_inj, :]            # (B, num_inj, H)
+        prod = well_pooled[:, self.num_inj:, :]           # (B, num_prod, H)
 
-        prod_preds = []
-        for i in range(self.num_prod):
-            prod_preds.append(self.prod_mlp(h_per_well[self.num_inj + i]))
+        inj_pred = self.inj_mlp(inj).squeeze(-1)          # (B, num_inj)
+        prod_pred = self.prod_mlp(prod)                   # (B, num_prod, 2)
 
-        inj_cat = torch.cat(inj_preds, dim=-1)
-        gas_rates = torch.cat([p[:1] for p in prod_preds], dim=-1)
-        wat_rates = torch.cat([p[1:] for p in prod_preds], dim=-1)
-        return torch.cat([inj_cat, gas_rates, wat_rates], dim=-1)
-
-
-class GNNStaticEncoder(nn.Module):
-    """Encodes static per-node features into a graph-level latent vector."""
-
-    def __init__(
-        self,
-        in_channels: int,
-        latent_dim: int = 32,
-        hidden_dim: int = 32,
-        num_layers: int = 3,
-        heads: int = 2,
-        edge_dim: int = 7,
-        dropout: float = 0.1,
-        conv_type: str = 'gine',
-    ):
-        super().__init__()
-        self.gnn = GNNStack(
-            in_channels=in_channels,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
-            num_layers=num_layers,
-            heads=heads,
-            edge_dim=edge_dim,
-            dropout=dropout,
-            conv_type=conv_type,
-        )
-        self.pool = AttentionPooling(hidden_dim, latent_dim)
+        gas_rates = prod_pred[..., 0]                     # (B, num_prod)
+        wat_rates = prod_pred[..., 1]                     # (B, num_prod)
+        return torch.cat([inj_pred, gas_rates, wat_rates], dim=-1)
 
 
 class GNNDynamicEncoder(nn.Module):

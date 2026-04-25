@@ -179,7 +179,39 @@ class RLTrainingDashboard:
             widgets.HBox([self.eval_interval_spinner, self.eval_num_cases_spinner]),
             self.eval_info_label
         ])
-        
+
+        # === Reward Scheme Options ===
+        # Default unchecked = dense per-step reward (current behavior).
+        # Checked      = sparse: agent only sees the cumulative episode return
+        #                at the terminal step; intermediate steps emit 0.
+        self.sparse_reward_checkbox = widgets.Checkbox(
+            value=False,
+            description='Sparse reward (only at episode end)',
+            indent=False,
+            layout=widgets.Layout(width='auto', margin='5px 10px'),
+            style={'description_width': 'initial'}
+        )
+
+        self.reward_mode_info = widgets.HTML(
+            value=(
+                "<p style='font-size:11px; color:#666; margin:2px 10px;'>"
+                "<b>Default (unchecked) — Dense:</b> the agent receives the per-step "
+                "economic value <code>r<sub>t</sub></code> at every environment step.<br>"
+                "<b>Checked — Sparse:</b> intermediate steps emit <code>0</code> and the "
+                "agent only receives the <b>cumulative</b> episode return "
+                "<code>&Sigma;<sub>t</sub> r<sub>t</sub></code> as a single reward at the terminal step.<br>"
+                "Logging, plots, and best-episode tracking still use the true per-step "
+                "values so dashboards remain comparable across modes.</p>"
+            )
+        )
+
+        reward_mode_box = widgets.VBox([
+            widgets.HTML("<hr style='margin:5px 0'>"),
+            widgets.HTML("<b style='margin-left:10px'>Reward Scheme</b>"),
+            self.sparse_reward_checkbox,
+            self.reward_mode_info,
+        ])
+
         # Main widget
         self.main_widget = widgets.VBox([
             widgets.HTML("<h3>RL Training Dashboard</h3>"),
@@ -188,6 +220,7 @@ class RLTrainingDashboard:
             self.training_info,
             self.progress_bar,
             eval_options_box,
+            reward_mode_box,
             self.status_output
         ])
     
@@ -301,13 +334,27 @@ class RLTrainingDashboard:
                 elif 'runtime' in self.config.config and 'wandb' in self.config.config['runtime']:
                     pass
                 algo_type = rl_model_cfg.get('algorithm', {}).get('type', 'SAC')
+
+                # Capture the reward scheme (chosen on the dashboard) BEFORE
+                # initializing WandB so it appears in the run name, tags, and
+                # logged config and can be filtered from the WandB UI.
+                use_sparse_reward = bool(getattr(self, 'sparse_reward_checkbox', None)
+                                         and self.sparse_reward_checkbox.value)
+                reward_mode = 'sparse' if use_sparse_reward else 'dense'
+                self.config.config.setdefault('rl_model', {}) \
+                    .setdefault('reward', {})['mode'] = reward_mode
+
                 wandb_cfg = self.config.config.setdefault('runtime', {}).setdefault('wandb', {})
                 wandb_cfg['project'] = 'RL-SAC'
                 if not wandb_cfg.get('name'):
-                    wandb_cfg['name'] = f"{algo_type}_{prediction_mode}_{rom_name}"
+                    wandb_cfg['name'] = (
+                        f"{algo_type}_{prediction_mode}_{rom_name}"
+                        f"_rew{reward_mode.capitalize()}"
+                    )
                 wandb_cfg.setdefault('tags', [])
                 if isinstance(wandb_cfg['tags'], list):
-                    for tag in [f'RL-{algo_type}', prediction_mode, rom_name]:
+                    for tag in [f'RL-{algo_type}', prediction_mode, rom_name,
+                                f'reward-{reward_mode}']:
                         if tag not in wandb_cfg['tags']:
                             wandb_cfg['tags'].append(tag)
                 
@@ -454,6 +501,26 @@ class RLTrainingDashboard:
                 print(f"      Checkpoints saved based on deterministic policy NPV (no exploration noise)")
             else:
                 print(f"\n   ℹ️  Checkpoint Selection: Training reward (default)")
+
+            # Reward scheme: prefer the value stamped into config during
+            # _setup_training_components (which is the same value WandB was
+            # registered with). Fall back to the live checkbox if setup
+            # didn't stash it (e.g. legacy code path).
+            stamped_mode = (
+                self.config.config.get('rl_model', {})
+                .get('reward', {})
+                .get('mode')
+            )
+            if stamped_mode in ('dense', 'sparse'):
+                use_sparse_reward = (stamped_mode == 'sparse')
+            else:
+                use_sparse_reward = bool(self.sparse_reward_checkbox.value)
+
+            if use_sparse_reward:
+                print(f"\n   ⏳ Reward Scheme: SPARSE (cumulative reward at terminal step only)")
+                print(f"      Intermediate steps emit 0 to the agent; logging keeps true per-step values")
+            else:
+                print(f"\n   ⚡ Reward Scheme: DENSE (per-step economic value, default)")
             
             # Reset tracking variables
             self.episode_rewards = []
@@ -478,7 +545,12 @@ class RLTrainingDashboard:
                     step_rewards = []
                     episode_policy_losses = []  # Track policy losses for this episode
                     episode_q_losses = []        # Track Q-value losses for this episode
-                    
+
+                    # Per-episode accumulator used only when sparse reward mode
+                    # is active; lazily allocated as a tensor matching the env
+                    # reward shape on the correct device.
+                    sparse_reward_accumulator = None
+
                     # Reset environment - start from randomly selected realistic initial latent state
                     state = self.environment.reset(z0_options)
                     
@@ -499,8 +571,10 @@ class RLTrainingDashboard:
                         
                         # Step environment
                         next_state, reward, done = self.environment.step(action)
-                        
-                        # Record step data
+
+                        # Record step data — always uses the TRUE per-step reward
+                        # so visualization, best-episode tracking, and economic
+                        # breakdowns are identical across reward schemes.
                         observation = getattr(self.environment, 'last_observation', None)
                         self.training_orchestrator.record_step_data(
                             step=step,
@@ -509,17 +583,31 @@ class RLTrainingDashboard:
                             reward=reward,
                             state=state
                         )
-                        
+
                         self.total_numsteps += 1
                         step_rewards.append(reward.item())
-                        
+
+                        # Build the reward signal that the AGENT sees. Dense
+                        # mode passes through the env reward; sparse mode only
+                        # delivers the cumulative episode return at termination.
+                        if use_sparse_reward:
+                            if sparse_reward_accumulator is None:
+                                sparse_reward_accumulator = torch.zeros_like(reward)
+                            sparse_reward_accumulator = sparse_reward_accumulator + reward
+                            if done:
+                                agent_reward = sparse_reward_accumulator
+                            else:
+                                agent_reward = torch.zeros_like(reward)
+                        else:
+                            agent_reward = reward
+
                         if getattr(self, '_is_ppo', False):
                             # PPO: collect transition in rollout buffer
-                            self.agent.collect_step(state, action, reward, done)
+                            self.agent.collect_step(state, action, agent_reward, done)
                         else:
                             # Off-policy: store transition in replay memory
-                            self.memory.push(state, action, reward, next_state)
-                        
+                            self.memory.push(state, action, agent_reward, next_state)
+
                         # Move to next state
                         state = next_state
                         episode_reward += reward.item()

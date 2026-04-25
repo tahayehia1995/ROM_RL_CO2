@@ -113,7 +113,7 @@ HYPERPARAMETER_GRID = {
     'enable_multimodal': [False],           # Separate static (PERMI/POROS) from dynamic (SG/PRES) branches. Must be False if enable_gnn is True
     
     # GNN (Graph Neural Network encoder/decoder) - requires n_channels=4, torch_geometric
-    'enable_gnn':[False],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
+    'enable_gnn':[True],                 # Replace CNN encoder/decoder with GNN (GATv2-based)
     
     # FNO (Fourier Neural Operator encoder/decoder) - invertible spectral convolution, requires n_channels=4
     'enable_fno': [False],                # Replace CNN encoder/decoder with FNO (spectral-based)
@@ -122,7 +122,7 @@ HYPERPARAMETER_GRID = {
     # Multi-embedding multimodal: per-field encoder/decoder backbone choice (CNN or FNO per branch),
     # one shared conditioned transition. Requires n_channels=4. Mutually exclusive with enable_gnn / enable_fno.
     # When True, enable_multimodal is auto-disabled (this option subsumes it).
-    'enable_multi_embedding_multimodal': [True],   # NEW
+    'enable_multi_embedding_multimodal': [False],   # NEW
     'mem_branches_preset': ['cnn_sg__fno_pres'],    # Named preset (see MEM_PRESETS below)
     
     # Transition model type
@@ -135,6 +135,15 @@ HYPERPARAMETER_GRID = {
     'lambda_cycle_loss': [0.1],           # Cycle loss weight
     'enable_scheduled_sampling': [False], # Gradually replace teacher forcing with self-sampling
     'enable_latent_noise': [False],       # Inject noise into latent space during training
+
+    # ===== Pretrained warm-start (auto-search saved_models for compatible weights) =====
+    # When True, the trainer scans ROM_Refactored/saved_models/ for compatible
+    # SAME-FAMILY checkpoints and warm-starts whichever of (encoder/decoder)
+    # and/or (transition) match.  If any component is warm-started the run
+    # uses the reduced ``pretrained_epoch`` budget; otherwise it falls back
+    # to from-scratch training with the full ``epoch`` budget.
+    'use_pretrained':   [False],
+    'pretrained_epoch': [50],
 }
 
 # Multi-embedding multimodal presets. Each entry is a list of branch specs in
@@ -689,7 +698,15 @@ def create_run_id(hyperparams: Dict[str, Any], run_index: int) -> str:
     trn = hyperparams.get('transition_type', 'linear')
     if trn != 'linear':
         parts.append(f"trn{trn.upper()}")
-    
+
+    # Pretrained warm-start marker so resulting checkpoints are
+    # distinguishable from purely from-scratch runs.  Always added when
+    # use_pretrained=True regardless of whether the catalog actually
+    # found a hit (keeps the output filename predictable from
+    # hyperparams alone).
+    if hyperparams.get('use_pretrained', False):
+        parts.append("pt")
+
     return '_'.join(parts)
 
 
@@ -785,7 +802,11 @@ def create_run_name(hyperparams: Dict[str, Any], run_index: int,
     if mem_enable:
         preset = hyperparams.get('mem_branches_preset', 'unknown')
         parts.append(f"mem-{preset.replace('_', '-')}")
-    
+
+    # Pretrained warm-start marker
+    if hyperparams.get('use_pretrained', False):
+        parts.append("pt")
+
     return '_'.join(parts)
 
 
@@ -831,6 +852,13 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
     # Update training hyperparameters
     config.set('training.batch_size', hyperparams['batch_size'])
     config.set('training.nsteps', hyperparams['n_steps'])
+
+    # Surface warm-start flags into the config so wandb_integration can
+    # log them as run-level metadata (use_pretrained, pretrained_epoch).
+    if 'training' not in config.config:
+        config.config['training'] = {}
+    config.config['training']['use_pretrained']   = bool(hyperparams.get('use_pretrained', False))
+    config.config['training']['pretrained_epoch'] = int(hyperparams.get('pretrained_epoch', 50))
     
     # Update model hyperparameters
     config.set('model.latent_dim', hyperparams['latent_dim'])
@@ -1194,7 +1222,9 @@ def update_config_with_hyperparams(config_path: str, hyperparams: Dict[str, Any]
 # ============================================================================
 
 def train_model(config: Config, loaded_data: Dict[str, Any], 
-                run_id: str, run_name: str, output_dir: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
+                run_id: str, run_name: str, output_dir: str,
+                hyperparams: Optional[Dict[str, Any]] = None,
+                catalog=None) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """
     Train a model with given configuration.
     
@@ -1204,10 +1234,19 @@ def train_model(config: Config, loaded_data: Dict[str, Any],
         run_id: Unique run identifier
         run_name: Human-readable run name
         output_dir: Directory to save models
-        
+        hyperparams: Optional hyperparameter dict (forwarded by
+                     ``run_single_training``).  Required for the
+                     pretrained warm-start path.
+        catalog: Optional :class:`utilities.checkpoint_catalog.CheckpointCatalog`
+                 used when ``hyperparams['use_pretrained']`` is True.
+
     Returns:
         Tuple of (results_dict, model_paths_dict)
     """
+    # Default to empty dict so the warm-start guard below is a no-op
+    # when callers don't pass hyperparams.
+    if hyperparams is None:
+        hyperparams = {}
     # Extract data
     STATE_train = loaded_data['STATE_train']
     BHP_train = loaded_data['BHP_train']
@@ -1261,7 +1300,46 @@ def train_model(config: Config, loaded_data: Dict[str, Any],
     # Initialize model
     my_rom = ROMWithE2C(config).to(config.device)
     wandb_logger.watch_model(my_rom)
-    
+
+    # ---- Pretrained warm-start (auto-search saved_models for compatible weights) ----
+    # Strict same-family matching only.  No freeze schedule -- whatever
+    # is loaded is fine-tuned together at the reduced ``pretrained_epoch``.
+    warm_start_summary = {'encoder': False, 'decoder': False, 'transition': False}
+    if hyperparams.get('use_pretrained', False) and catalog is not None:
+        from utilities.checkpoint_catalog import build_target_signature
+        target_sig = build_target_signature(hyperparams)
+        if target_sig is None:
+            print(f"   ⚠️  use_pretrained=True but the active embedder family "
+                  f"is not supported for warm-start; running from scratch.")
+        else:
+            enc_dec = catalog.find_compatible_encoder_decoder(target_sig)
+            trans   = catalog.find_compatible_transition(target_sig)
+            try:
+                warm_start_summary = my_rom.load_partial_weights(
+                    encoder_file   = enc_dec[0] if enc_dec else None,
+                    decoder_file   = enc_dec[1] if enc_dec else None,
+                    transition_file= trans      if trans   else None,
+                )
+            except Exception as e:
+                print(f"   ❌ Pretrained load failed: {e}")
+                print(f"      Falling back to from-scratch training.")
+                warm_start_summary = {'encoder': False, 'decoder': False, 'transition': False}
+
+            if any(warm_start_summary.values()):
+                original_ep = config.training['epoch']
+                pre_ep = int(hyperparams.get('pretrained_epoch', 50))
+                config.training['epoch'] = pre_ep
+                loaded_names = [k for k, v in warm_start_summary.items() if v]
+                print(f"   🔁 Pretrained warm-start: loaded {loaded_names} | "
+                      f"epoch budget {original_ep} -> {pre_ep}")
+                if enc_dec:
+                    print(f"      enc/dec from: {os.path.basename(enc_dec[0])}")
+                if trans:
+                    print(f"      transition from: {os.path.basename(trans)}")
+            else:
+                print(f"   use_pretrained=True but no compatible checkpoint "
+                      f"found in saved_models; running from scratch.")
+
     # Setup schedulers
     num_batch = int(num_train / config.training['batch_size'])
     total_training_steps = num_batch * config.training['epoch']
@@ -1394,7 +1472,8 @@ def train_model(config: Config, loaded_data: Dict[str, Any],
 
 
 def run_single_training(config_path: str, hyperparams: Dict[str, Any], run_index: int, 
-                       output_dir: str, processed_data_dir: str = None) -> Optional[Dict[str, Any]]:
+                       output_dir: str, processed_data_dir: str = None,
+                       catalog=None) -> Optional[Dict[str, Any]]:
     """
     Run a single training with given hyperparameters.
     
@@ -1404,6 +1483,9 @@ def run_single_training(config_path: str, hyperparams: Dict[str, Any], run_index
         run_index: Index of the run
         output_dir: Directory to save models
         processed_data_dir: Directory containing processed data files
+        catalog: Optional :class:`utilities.checkpoint_catalog.CheckpointCatalog`
+                 used for the warm-start path when ``hyperparams['use_pretrained']``
+                 is True.  If None, warm-start is silently skipped.
         
     Returns:
         Dictionary with run results or None if failed
@@ -1464,7 +1546,10 @@ def run_single_training(config_path: str, hyperparams: Dict[str, Any], run_index
         
         # Run training with timing
         with Timer("training", log_dir=TIMING_LOG_DIR) as timer:
-            results, model_paths = train_model(config, loaded_data, run_id, run_name, output_dir)
+            results, model_paths = train_model(
+                config, loaded_data, run_id, run_name, output_dir,
+                hyperparams=hyperparams, catalog=catalog,
+            )
             
             # Collect metadata for timing log
             metadata = collect_training_metadata(config, loaded_data)
@@ -1606,7 +1691,16 @@ def main():
     # Run grid search
     print("\n🚀 Starting grid search...")
     print("=" * 80)
-    
+
+    # Build the warm-start catalog ONCE so the per-cell warm-start lookup
+    # is O(1) lookup instead of O(scan).  The catalog is read-only and
+    # safe to share across all grid cells.
+    from utilities.checkpoint_catalog import CheckpointCatalog
+    _catalog_dirs = [OUTPUT_DIR, os.path.join(_this_dir, 'saved_models')]
+    pretrained_catalog = CheckpointCatalog(_catalog_dirs)
+    print(f"   Warm-start catalog: {len(pretrained_catalog)} candidate "
+          f"checkpoint(s) indexed in {[os.path.basename(d) for d in _catalog_dirs]}")
+
     # Get default learning_rate and epochs from config for display
     default_lr = base_config.training['learning_rate']
     default_epochs = base_config.training.get('epoch', None)
@@ -1652,7 +1746,8 @@ def main():
         if hyperparams.get('adversarial_enable', False):
             print(f"   Adversarial training: enabled")
         
-        result = run_single_training(config_path, hyperparams, idx, OUTPUT_DIR, processed_data_dir)
+        result = run_single_training(config_path, hyperparams, idx, OUTPUT_DIR,
+                                     processed_data_dir, catalog=pretrained_catalog)
         
         if result:
             all_results.append(result)

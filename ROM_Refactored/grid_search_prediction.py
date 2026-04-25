@@ -445,7 +445,9 @@ def extract_latent_dim_from_weights(encoder_file: str) -> Optional[int]:
         
         if isinstance(state_dict, dict) and ('_multimodal' in state_dict or '_gnn' in state_dict or '_fno' in state_dict):
             total = 0
-            for branch in ('static_encoder', 'dynamic_encoder'):
+            # Hybrid GNN payloads may use either 'static_encoder' (canonical)
+            # or 'static_cnn' (interim pre-release).
+            for branch in ('static_encoder', 'static_cnn', 'dynamic_encoder'):
                 branch_sd = state_dict.get(branch, {})
                 if 'fc_mean.weight' in branch_sd:
                     total += branch_sd['fc_mean.weight'].shape[0]

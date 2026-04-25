@@ -82,6 +82,12 @@ class WandBLogger:
             result['batch_size'] = config.training.get('batch_size', 0)
             result['learning_rate'] = config.training.get('learning_rate', 0)
             result['nsteps'] = config.training.get('nsteps', 2)
+            # Pretrained warm-start flags (set by grid_search_training when
+            # use_pretrained is enabled).  Exposed here so the WandB UI can
+            # group / filter pretrained-derived runs.
+            result['use_pretrained'] = bool(config.training.get('use_pretrained', False))
+            if result['use_pretrained']:
+                result['pretrained_epoch'] = int(config.training.get('pretrained_epoch', 50))
         except Exception:
             pass
 
@@ -100,6 +106,7 @@ class WandBLogger:
                 result['rl_episodes'] = rl.get('sac', {}).get('num_episodes', 0)
                 result['rl_gamma'] = rl.get('sac', {}).get('gamma', 0.99)
                 result['rl_lr'] = rl.get('sac', {}).get('lr', 0.0003)
+                result['rl_reward_mode'] = rl.get('reward', {}).get('mode', 'dense')
         except Exception:
             pass
 

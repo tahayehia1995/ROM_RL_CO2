@@ -510,8 +510,12 @@ class TestingDashboard:
             if payload.get('_multimodal', False) or payload.get('_gnn', False) or payload.get('_fno', False):
                 if 'dynamic_encoder' in payload:
                     return payload['dynamic_encoder'], True
+                # Hybrid GNN payloads may use either the canonical
+                # 'static_encoder' key or the interim 'static_cnn' key.
                 if 'static_encoder' in payload:
                     return payload['static_encoder'], True
+                if 'static_cnn' in payload:
+                    return payload['static_cnn'], True
             if any(k.startswith('conv1.') or k.startswith('fc_mean.') for k in payload):
                 return payload, False
         return payload, False
@@ -585,10 +589,13 @@ class TestingDashboard:
                 if total > 0:
                     return total
 
-            # Multimodal / GNN encoder — sum branch latent dims
+            # Multimodal / GNN encoder — sum branch latent dims.  The
+            # static branch may be saved under either 'static_encoder'
+            # (canonical / multimodal / FNO / new GNN) or 'static_cnn'
+            # (interim pre-release hybrid GNN).
             if isinstance(payload, dict) and (payload.get('_multimodal') or payload.get('_gnn') or payload.get('_fno')):
                 total = 0
-                for branch in ('static_encoder', 'dynamic_encoder'):
+                for branch in ('static_encoder', 'static_cnn', 'dynamic_encoder'):
                     branch_sd = payload.get(branch, {})
                     if 'fc_mean.weight' in branch_sd:
                         total += branch_sd['fc_mean.weight'].shape[0]
